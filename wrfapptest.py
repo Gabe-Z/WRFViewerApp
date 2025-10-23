@@ -7,7 +7,6 @@ Features (MVP)
     - Open one or many wrfout_* NetCDF files (concatenated in time order).
     - Variables: MDBZ, RAINNC, RAINC, WSPD10, REFL1KM.
     - Time slider with smooth live redraw (debounced) + play/pause animation.
-    - Optional level selector for 3D variables (eg., dbz @ model level or pressure level via wrf-python interplevel).
     - Colormap dropdown
     - Export current frame as PNG.
     - Inline **Status Bar** progress for preloading (no popup)
@@ -37,7 +36,7 @@ from pathlib import Path
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QSplitter, QSpinBox, QToolBox, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QSplitter, QToolBox, QVBoxLayout, QWidget)
 from wrf import to_np # getvar, latlon_coords, ALL_TIMES, interplevel
 
 
@@ -371,18 +370,6 @@ class WRFViewer(QMainWindow):
         self.cmb_var.currentTextChanged.connect(self.on_var_changed)
         controls.addWidget(self.cmb_var)
         
-        controls.addWidget(QLabel('Level (hPa):'))
-        self.spn_level = QSpinBox()
-        self.spn_level.setRange(100, 1050)
-        self.spn_level.setValue(500)
-        self.spn_level.setSingleStep(25)
-        controls.addWidget(self.spn_level)
-        
-        self.chk_use_level = QCheckBox('Use Level')
-        self.chk_use_level.setChecked(False)
-        controls.addWidget(self.chk_use_level)
-        
-        
         # --- Colormap Picker ---
         controls.addWidget(QLabel('Colormap:'))
         self.cmb_cmap = QComboBox()
@@ -531,12 +518,6 @@ class WRFViewer(QMainWindow):
         self.update_plot()
     
     def on_var_changed(self, text: str):
-        canonical = self._canonical_var(text)
-        if canonical in ('MDBZ', 'MAXDBZ', 'REFL1KM'):
-            self.chk_use_level.setChecked(False)
-            self.chk_use_level.setEnabled(False)
-        else:
-            self.chk_use_level.setEnabled(True)
         self.loader.clear_preloaded()
         self._sync_category_selection(text)
         self.update_plot()
@@ -694,15 +675,14 @@ class WRFViewer(QMainWindow):
             return
         display_var = self.cmb_var.currentText()
         var = self._canonical_var(display_var)
-        level = self.spn_level.value() if self.chk_use_level.isChecked() else None
 
         # show inline progress bar
         self.pb.setVisible(True)
         self.pb.setValue(0)
-        self.status.showMessage(f'Preloading {display_var}' + (f' @ {level} hPa' if level is not None else ''))
+        self.status.showMessage(f'Preloading {display_var}')
 
         self.worker_thread = QtCore.QThread(self)
-        self.worker = PreloadWorker(self.loader, var, float(level) if level is not None else None)
+        self.worker = PreloadWorker(self.loader, var, None)
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.pb.setValue)
@@ -743,12 +723,12 @@ class WRFViewer(QMainWindow):
         
         display_var = self.cmb_var.currentText()
         var = self._canonical_var(display_var)
-        level = self.spn_level.value() if self.chk_use_level.isChecked() else None
+        level = None
 
-        data = self.loader.get_preloaded(var, float(level) if level is not None else None, idx)
+        data = self.loader.get_preloaded(var, None, idx)
         if data is None:
             try:
-                data = self.loader.get2d(frame, var, float(level) if level is not None else None)
+                data = self.loader.get2d(frame, var, None)
             except Exception as e:
                 QMessageBox.critical(self, 'Plot error', str(e))
                 return
@@ -802,7 +782,7 @@ class WRFViewer(QMainWindow):
             self._cbar.update_normal(self._img_art)
             self._cbar.set_label(label)
             
-        self.ax.set_title(self._title_text(display_var, var, level), loc='center', fontsize=12, fontweight='bold')
+        self.ax.set_title(self._title_text(display_var, var), loc='center', fontsize=12, fontweight='bold')
         self.canvas.draw_idle()
         
     def _default_range(self, var: str) -> tuple[T.Optional[float], T.Optional[float], str]:
@@ -817,14 +797,12 @@ class WRFViewer(QMainWindow):
             return 0.0, 70.0, 'Reflectivity @ 1km AGL (dBZ)'
         return None, None, var
     
-    def _title_text(self, display_var: str, canonical_var: str, level: T.Optional[int]) -> str:
+    def _title_text(self, display_var: str, canonical_var: str) -> str:
         v = canonical_var.upper()
         if v in ('MDBZ', 'MAXDBZ'):
             return 'MDBZ (Column Max dBZ)'
         if v == 'REFL1KM':
             return 'Reflectivity @ 1 km AGL (dBZ)'
-        if level is not None and self.chk_use_level.isChecked():
-            return f'{display_var} @ {level} hPa'
         return display_var
         
     # ---------------
