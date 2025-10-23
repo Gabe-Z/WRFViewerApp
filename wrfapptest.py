@@ -357,8 +357,6 @@ class WRFViewer(QMainWindow):
         self.btn_open.clicked.connect(self.on_open)
         controls.addWidget(self.btn_open)
         
-        controls.addWidget(QLabel('Variable:'))
-        self.cmb_var = QComboBox()
         seen_labels: set[str] = set()
         self._variable_labels: list[str] = []
         for items in self.var_categories.values():
@@ -366,9 +364,8 @@ class WRFViewer(QMainWindow):
                 if label not in seen_labels:
                     seen_labels.add(label)
                     self._variable_labels.append(label)
-                    self.cmb_var.addItem(label)
-        self.cmb_var.currentTextChanged.connect(self.on_var_changed)
-        controls.addWidget(self.cmb_var)
+
+        self.current_var_label: str = self._variable_labels[0] if self._variable_labels else ''
         
         # --- Colormap Picker ---
         controls.addWidget(QLabel('Colormap:'))
@@ -491,9 +488,8 @@ class WRFViewer(QMainWindow):
         self.ax.add_feature(cfeature.BORDERS.with_scale('50m'), linewidth=0.6)
 
         # Sync default selection with accordion
-        current_label = self.cmb_var.currentText()
-        if current_label:
-            self._sync_category_selection(current_label)
+        if self.current_var_label:
+            self._sync_category_selection(self.current_var_label)
     
     # ---------------
     # Event handlers
@@ -518,6 +514,9 @@ class WRFViewer(QMainWindow):
         self.update_plot()
     
     def on_var_changed(self, text: str):
+        if not text:
+            return
+        self.current_var_label = text
         self.loader.clear_preloaded()
         self._sync_category_selection(text)
         self.update_plot()
@@ -533,16 +532,11 @@ class WRFViewer(QMainWindow):
             self._last_category_index = self._category_lists.index(list_widget)
         else:
             self._last_category_index = None
-        current = self.cmb_var.currentText()
-        if current == label:
-            # Ensure downstream actions happen even if combo box doesn't emit
+        if self.current_var_label == label:
+            # Ensure downstream actions happen even if the same label is re-selected
             self.on_var_changed(label)
             return
-        idx = self.cmb_var.findText(label)
-        if idx == -1:
-            self.cmb_var.addItem(label)
-            idx = self.cmb_var.count() - 1
-        self.cmb_var.setCurrentIndex(idx)
+        self.on_var_changed(label)
 
     def _sync_category_selection(self, label: str) -> None:
         if not label:
@@ -673,7 +667,7 @@ class WRFViewer(QMainWindow):
     def on_preload(self):
         if not self.loader.frames:
             return
-        display_var = self.cmb_var.currentText()
+        display_var = self.current_var_label
         var = self._canonical_var(display_var)
 
         # show inline progress bar
@@ -721,7 +715,7 @@ class WRFViewer(QMainWindow):
         frame = self.loader.frames[idx]
         self.lbl_time.setText(f'Time: {frame.timestamp_str}')
         
-        display_var = self.cmb_var.currentText()
+        display_var = self.current_var_label
         var = self._canonical_var(display_var)
         level = None
 
