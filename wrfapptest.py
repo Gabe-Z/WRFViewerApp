@@ -7,7 +7,6 @@ Features (MVP)
     - Open one or many wrfout_* NetCDF files (concatenated in time order).
     - Variables: MDBZ, RAINNC, RAINC, WSPD10, REFL1KM.
     - Time slider with smooth live redraw (debounced) + play/pause animation.
-    - Optional level selector for 3D variables (eg., dbz @ model level or pressure level via wrf-python interplevel).
     - Colormap dropdown
     - Export current frame as PNG.
     - Inline **Status Bar** progress for preloading (no popup)
@@ -37,7 +36,7 @@ from pathlib import Path
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QSplitter, QSpinBox, QToolBox, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QSplitter, QToolBox, QVBoxLayout, QWidget)
 from wrf import to_np # getvar, latlon_coords, ALL_TIMES, interplevel
 
 
@@ -316,6 +315,33 @@ class WRFViewer(QMainWindow):
         central = QWidget(self)
         self.setCentralWidget(central)
         vbox = QVBoxLayout(central)
+
+        # --- Variable categories (accordion data) ---
+        self.var_categories: dict[str, list[tuple[str, str]]] = {
+            'Surface': [
+                ('MDBZ', 'MDBZ'),
+                ('RAINNC', 'RAINNC'),
+                ('RAINC', 'RAINC'),
+                ('WIND10', 'WSPD10'),
+            ],
+            'Severe': [
+                ('MDBZ', 'MDBZ'),
+                ('REFL1KM', 'REFL1KM'),
+            ],
+            'Upper Air': [
+                ('REFL1KM', 'REFL1KM'),
+            ],
+        }
+        self._var_aliases: dict[str, str] = {
+            label.upper(): canonical.upper()
+            for items in self.var_categories.values()
+            for label, canonical in items
+        }
+
+        # ensure canonical names include themselves
+        for canonical in {c for items in self.var_categories.values() for _, c in items}:
+            self._var_aliases.setdefault(canonical.upper(), canonical.upper())
+
         
         # --- Status Bar Progress (inline) ---
         self.status = QtWidgets.QStatusBar()
@@ -333,21 +359,16 @@ class WRFViewer(QMainWindow):
         
         controls.addWidget(QLabel('Variable:'))
         self.cmb_var = QComboBox()
-        self.cmb_var.addItems(['MDBZ', 'RAINNC', 'RAINC', 'WSPD10', 'REFL1KM']) # extend as needed
+        seen_labels: set[str] = set()
+        self._variable_labels: list[str] = []
+        for items in self.var_categories.values():
+            for label, _ in items:
+                if label not in seen_labels:
+                    seen_labels.add(label)
+                    self._variable_labels.append(label)
+                    self.cmb_var.addItem(label)
         self.cmb_var.currentTextChanged.connect(self.on_var_changed)
         controls.addWidget(self.cmb_var)
-        
-        controls.addWidget(QLabel('Level (hPa):'))
-        self.spn_level = QSpinBox()
-        self.spn_level.setRange(100, 1050)
-        self.spn_level.setValue(500)
-        self.spn_level.setSingleStep(25)
-        controls.addWidget(self.spn_level)
-        
-        self.chk_use_level = QCheckBox('Use Level')
-        self.chk_use_level.setChecked(False)
-        controls.addWidget(self.chk_use_level)
-        
         
         # --- Colormap Picker ---
         controls.addWidget(QLabel('Colormap:'))
@@ -399,12 +420,59 @@ class WRFViewer(QMainWindow):
         time_row.addWidget(self.sld_time, stretch=1)
         vbox.addLayout(time_row)
         
-        # --- Figure ---
+        # --- Figure & Accordion Layout ---
         self.fig = plt.figure(figsize=(10, 8))
         self.ax = plt.axes(projection=ccrs.PlateCarree())
         self.canvas = FigureCanvas(self.fig)
-        vbox.addWidget(NavToolbar(self.canvas, self))
-        vbox.addWidget(self.canvas, stretch=1)
+        self.toolbar = NavToolbar(self.canvas, self)
+
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setHandleWidth(6)
+
+        self.var_toolbox = QToolBox()
+        self.var_toolbox.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self._category_lists: list[QListWidget] = []
+        self._last_category_index: T.Optional[int] = None
+        for category, items in self.var_categories.items():
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.setSpacing(4)
+            list_widget = QListWidget()
+            list_widget.setSelectionMode(QListWidget.SingleSelection)
+            for label, canonical in items:
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, label)
+                item.setData(Qt.UserRole + 1, canonical)
+                list_widget.addItem(item)
+            list_widget.itemClicked.connect(self._on_category_var_selected)
+            page_layout.addWidget(list_widget)
+            page_layout.addStretch(1)
+            self.var_toolbox.addItem(page, category)
+            self._category_lists.append(list_widget)
+
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+        left_layout.addWidget(QLabel('Variable Categories'))
+        left_layout.addWidget(self.var_toolbox, stretch=1)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+        right_layout.addWidget(self.toolbar)
+        right_layout.addWidget(self.canvas, stretch=1)
+
+        self.main_splitter.addWidget(left_panel)
+        self.main_splitter.addWidget(right_panel)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        left_panel.setMinimumWidth(200)
+
+        vbox.addWidget(self.main_splitter, stretch=1)
         
         # -- Load colormaps (builtins + user folders) and pick last used.
         self._init_colormaps()
@@ -421,6 +489,11 @@ class WRFViewer(QMainWindow):
         self.ax.add_feature(cfeature.COASTLINE.with_scale('50m'), linewidth=0.6)
         self.ax.add_feature(cfeature.STATES.with_scale('50m'), linewidth=0.4)
         self.ax.add_feature(cfeature.BORDERS.with_scale('50m'), linewidth=0.6)
+
+        # Sync default selection with accordion
+        current_label = self.cmb_var.currentText()
+        if current_label:
+            self._sync_category_selection(current_label)
     
     # ---------------
     # Event handlers
@@ -445,13 +518,70 @@ class WRFViewer(QMainWindow):
         self.update_plot()
     
     def on_var_changed(self, text: str):
-        if text.upper() in ('MDBZ', 'MAXDBZ', 'REFL1KM'):
-            self.chk_use_level.setChecked(False)
-            self.chk_use_level.setEnabled(False)
-        else:
-            self.chk_use_level.setEnabled(True)
         self.loader.clear_preloaded()
+        self._sync_category_selection(text)
         self.update_plot()
+
+    def _on_category_var_selected(self, item: QListWidgetItem):
+        if item is None:
+            return
+        label = item.data(Qt.UserRole) or item.text()
+        if not label:
+            return
+        list_widget = item.listWidget()
+        if list_widget in self._category_lists:
+            self._last_category_index = self._category_lists.index(list_widget)
+        else:
+            self._last_category_index = None
+        current = self.cmb_var.currentText()
+        if current == label:
+            # Ensure downstream actions happen even if combo box doesn't emit
+            self.on_var_changed(label)
+            return
+        idx = self.cmb_var.findText(label)
+        if idx == -1:
+            self.cmb_var.addItem(label)
+            idx = self.cmb_var.count() - 1
+        self.cmb_var.setCurrentIndex(idx)
+
+    def _sync_category_selection(self, label: str) -> None:
+        if not label:
+            return
+        matches: dict[int, QListWidgetItem] = {}
+        for idx, lst in enumerate(self._category_lists):
+            items = lst.findItems(label, Qt.MatchExactly)
+            if items:
+                matches[idx] = items[0]
+
+        if not matches:
+            for lst in self._category_lists:
+                lst.blockSignals(True)
+                lst.clearSelection()
+                lst.blockSignals(False)
+            self._last_category_index = None
+            return
+
+        preferred = self._last_category_index
+        target_index: T.Optional[int] = preferred if preferred in matches else next(iter(matches))
+
+        for idx, lst in enumerate(self._category_lists):
+            lst.blockSignals(True)
+            if idx == target_index:
+                item = matches[idx]
+                lst.setCurrentItem(item, QtCore.QItemSelectionModel.ClearAndSelect)
+                lst.scrollToItem(item, QtWidgets.QAbstractItemView.PositionAtCenter)
+            else:
+                lst.clearSelection()
+            lst.blockSignals(False)
+
+        if target_index is not None:
+            self.var_toolbox.setCurrentIndex(target_index)
+        self._last_category_index = None
+
+    def _canonical_var(self, var: str) -> str:
+        if not var:
+            return ''
+        return self._var_aliases.get(var.upper(), var.upper())
     
     def on_toggle_play(self, checked: bool):
         if checked:
@@ -543,16 +673,16 @@ class WRFViewer(QMainWindow):
     def on_preload(self):
         if not self.loader.frames:
             return
-        var = self.cmb_var.currentText()
-        level = self.spn_level.value() if self.chk_use_level.isChecked() else None
-        
+        display_var = self.cmb_var.currentText()
+        var = self._canonical_var(display_var)
+
         # show inline progress bar
         self.pb.setVisible(True)
         self.pb.setValue(0)
-        self.status.showMessage(f'Preloading {var}' + (f' @ {level} hPa' if level is not None else ''))
-        
+        self.status.showMessage(f'Preloading {display_var}')
+
         self.worker_thread = QtCore.QThread(self)
-        self.worker = PreloadWorker(self.loader, var, float(level) if level is not None else None)
+        self.worker = PreloadWorker(self.loader, var, None)
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.pb.setValue)
@@ -591,13 +721,14 @@ class WRFViewer(QMainWindow):
         frame = self.loader.frames[idx]
         self.lbl_time.setText(f'Time: {frame.timestamp_str}')
         
-        var = self.cmb_var.currentText()
-        level = self.spn_level.value() if self.chk_use_level.isChecked() else None
-        
-        data = self.loader.get_preloaded(var, float(level) if level is not None else None, idx)
+        display_var = self.cmb_var.currentText()
+        var = self._canonical_var(display_var)
+        level = None
+
+        data = self.loader.get_preloaded(var, None, idx)
         if data is None:
             try:
-                data = self.loader.get2d(frame, var, float(level) if level is not None else None)
+                data = self.loader.get2d(frame, var, None)
             except Exception as e:
                 QMessageBox.critical(self, 'Plot error', str(e))
                 return
@@ -651,7 +782,7 @@ class WRFViewer(QMainWindow):
             self._cbar.update_normal(self._img_art)
             self._cbar.set_label(label)
             
-        self.ax.set_title(self._title_text(var, level), loc='center', fontsize=12, fontweight='bold')
+        self.ax.set_title(self._title_text(display_var, var), loc='center', fontsize=12, fontweight='bold')
         self.canvas.draw_idle()
         
     def _default_range(self, var: str) -> tuple[T.Optional[float], T.Optional[float], str]:
@@ -660,20 +791,19 @@ class WRFViewer(QMainWindow):
             return 0.0, 70.0, 'Reflectivity (dBZ)'
         if v in ('RAINNC', 'RAINC'):
             return 0.0, None, 'Accumulated Precip (mm)'
-        if v == 'WSPD10':
+        if v in ('WSPD10', 'WIND10'):
             return 0.0, 40.0, '10-m wind speed (m s$^{-1}$)'
         if v == 'REFL1KM':
             return 0.0, 70.0, 'Reflectivity @ 1km AGL (dBZ)'
         return None, None, var
     
-    def _title_text(self, var: str, level: T.Optional[int]) -> str:
-        if var.upper() in ('MDBZ', 'MAXDBZ'):
+    def _title_text(self, display_var: str, canonical_var: str) -> str:
+        v = canonical_var.upper()
+        if v in ('MDBZ', 'MAXDBZ'):
             return 'MDBZ (Column Max dBZ)'
-        if var.upper() == 'REFL1KM':
+        if v == 'REFL1KM':
             return 'Reflectivity @ 1 km AGL (dBZ)'
-        if level is not None and self.chk_use_level.isChecked():
-            return f'{var} @ {level} hPa'
-        return var
+        return display_var
         
     # ---------------
     # Utilities
