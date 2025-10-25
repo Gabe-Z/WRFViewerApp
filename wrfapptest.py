@@ -20,8 +20,10 @@ from __future__ import annotations
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import glob
+from collections import OrderedDict
 import matplotlib.pyplot as plt
 import numpy as np
+from numpy import float32
 import os
 import shutil
 import sys
@@ -48,6 +50,88 @@ class WRFFrame:
     path: str
     time_index: int
     timestamp_str: str
+
+
+@dataclass(frozen=True)
+class UpperAirSpec:
+    canonical: str
+    display_name: str
+    level_hpa: float
+    shading_field: str
+    colorbar_label: str
+    vmin: T.Optional[float] = None
+    vmax: T.Optional[float] = None
+    contour_field: T.Optional[str] = None
+    contour_levels: T.Optional[T.Sequence[float]] = None
+    contour_color: str = 'black'
+    contour_width: float = 0.8
+    barb_stride: int = 12
+    barb_length: float = 6.0
+    barb_color: str = 'black'
+    title: str = ''
+
+
+@dataclass
+class UpperAirData:
+    scalar: np.ndarray
+    contour: T.Optional[np.ndarray]
+    u: np.ndarray
+    v: np.ndarray
+
+
+UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
+    'HGT500': UpperAirSpec(
+        canonical='HGT500',
+        display_name='500 mb Hgt/Wind',
+        level_hpa=500.0,
+        shading_field='height',
+        colorbar_label='500 hPa Geopotential Height (m)',
+        vmin=4800.0,
+        vmax=6000.0,
+        contour_field='height',
+        contour_levels=np.arange(4800.0, 6000.1, 60.0),
+        contour_color='black',
+        contour_width=0.9,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='500 hPa Height & Wind',
+    ),
+    'RH700': UpperAirSpec(
+        canonical='RH700',
+        display_name='700 mb RH/Wind',
+        level_hpa=700.0,
+        shading_field='rh',
+        colorbar_label='700 hPa Relative Humidity (%)',
+        vmin=0.0,
+        vmax=100.0,
+        contour_field='height',
+        contour_levels=np.arange(2800.0, 3400.1, 30.0),
+        contour_color='black',
+        contour_width=0.8,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='700 hPa Relative Humidity & Wind',
+    ),
+    'TEMP850': UpperAirSpec(
+        canonical='TEMP850',
+        display_name='850 mb Temp/Wind',
+        level_hpa=850.0,
+        shading_field='temperature',
+        colorbar_label='850 hPa Temperature (°C)',
+        vmin=-30.0,
+        vmax=30.0,
+        contour_field='height',
+        contour_levels=np.arange(1300.0, 1700.1, 30.0),
+        contour_color='white',
+        contour_width=1.0,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='850 hPa Temperature & Wind',
+    ),
+}
     
 class WRFLoader(QtCore.QObject):
     '''
@@ -58,10 +142,13 @@ class WRFLoader(QtCore.QObject):
         super().__init__()
         self.files: list[str] = []
         self.frames: list[WRFFrame] = []
-        self._cache: dict[tuple[str, str, int], np.ndarray] = {}
+        self._cache: dict[tuple[str, str, int], T.Any] = {}
         self._geo_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        # Preload store: {(VAR, level_or_None): [np.ndarray | None per frame]}
-        self.preloaded: dict[tuple[str, T.Optional[float]], list[T.Optional[np.ndarray]]] = {}
+        # Preload store: {(VAR, level_or_None): [object | None per frame]}
+        self.preloaded: dict[tuple[str, T.Optional[float]], list[T.Optional[T.Any]]] = {}
+        self._pressure_orientation: dict[str, str] = {}
+        self._upper_base_cache: OrderedDict[tuple[str, int], dict[str, np.ndarray]] = OrderedDict()
+        self._upper_base_cache_limit: int = 3
     
     # --- Loading and Indexing ---
     def open_files(self, paths: list[str]) -> None:
@@ -92,6 +179,8 @@ class WRFLoader(QtCore.QObject):
         self._cache.clear()
         self._geo_cache.clear()
         self.preloaded.clear()
+        self._pressure_orientation.clear()
+        self._upper_base_cache.clear()
         
     # --- Geometry ---
     def get_geo(self, frame: WRFFrame) -> tuple[np.ndarray, np.ndarray]:
@@ -111,19 +200,234 @@ class WRFLoader(QtCore.QObject):
                 lon = to_np(lons)
         self._geo_cache[fp] = (lat, lon)
         return lat, lon
-    
+
+    # --- Utilities for raw access ---
+    def _slice_time_var(self, var_obj, time_index: int) -> np.ndarray:
+        dims = tuple(getattr(var_obj, 'dimensions', ()))
+        if 'Time' in dims:
+            axis = dims.index('Time')
+            slicer = [slice(None)] * var_obj.ndim
+            slicer[axis] = time_index
+            data = np.array(var_obj[tuple(slicer)])
+        else:
+            data = np.array(var_obj[:])
+        return data
+
+    def _destagger(self, arr: np.ndarray, axis: int) -> np.ndarray:
+        slicer1 = [slice(None)] * arr.ndim
+        slicer2 = [slice(None)] * arr.ndim
+        slicer1[axis] = slice(0, -1)
+        slicer2[axis] = slice(1, None)
+        return 0.5 * (arr[tuple(slicer1)] + arr[tuple(slicer2)])
+
+    def _calc_pressure(self, nc: Dataset, time_index: int) -> np.ndarray:
+        p = self._slice_time_var(nc.variables['P'], time_index)
+        pb = self._slice_time_var(nc.variables['PB'], time_index)
+        return (p + pb).astype(float32)
+
+    def _calc_height(self, nc: Dataset, time_index: int) -> np.ndarray:
+        ph = self._slice_time_var(nc.variables['PH'], time_index)
+        phb = self._slice_time_var(nc.variables['PHB'], time_index)
+        z_full = (ph + phb) / 9.81
+        return 0.5 * (z_full[:-1, :, :] + z_full[1:, :, :])
+
+    def _calc_temperature(self, nc: Dataset, pressure: np.ndarray, time_index: int) -> np.ndarray:
+        theta = self._slice_time_var(nc.variables['T'], time_index) + 300.0
+        temp_k = theta * (pressure / 100000.0) ** (287.0 / 1004.0)
+        return temp_k.astype(float32)
+
+    def _calc_relative_humidity(self, temp_k: np.ndarray, pressure: np.ndarray, qv: np.ndarray) -> np.ndarray:
+        eps = 0.622
+        vap_press = (qv * pressure) / (eps + qv + 1e-12)
+        temp_c = temp_k - 273.15
+        es = 611.2 * np.exp((17.67 * temp_c) / (temp_c + 243.5))
+        es = np.maximum(es, 1.0)
+        rh = (vap_press / es) * 100.0
+        return np.clip(rh, 0.0, 100.0).astype(float32)
+
+    def _get_upper_base_fields(self, frame: WRFFrame) -> dict[str, np.ndarray]:
+        key = (frame.path, frame.time_index)
+        cached = self._upper_base_cache.get(key)
+        if cached is not None:
+            self._upper_base_cache.move_to_end(key)
+            return cached
+
+        with Dataset(frame.path) as nc:
+            pressure = self._calc_pressure(nc, frame.time_index).astype(float32)
+            height = self._calc_height(nc, frame.time_index).astype(float32)
+            u_stag = self._slice_time_var(nc.variables['U'], frame.time_index)
+            v_stag = self._slice_time_var(nc.variables['V'], frame.time_index)
+            u_mass = self._destagger(u_stag, axis=-1).astype(float32)
+            v_mass = self._destagger(v_stag, axis=-2).astype(float32)
+            temp_k = self._calc_temperature(nc, pressure, frame.time_index)
+            temp_c = (temp_k - 273.15).astype(float32)
+            qv = self._slice_time_var(nc.variables['QVAPOR'], frame.time_index)
+            rh = self._calc_relative_humidity(temp_k, pressure, qv).astype(float32)
+            wspd = np.hypot(u_mass, v_mass).astype(float32)
+
+        fields = {
+            'pressure': pressure,
+            'height': height,
+            'temperature': temp_c,
+            'rh': rh,
+            'u': u_mass,
+            'v': v_mass,
+            'wspd': wspd,
+        }
+        self._upper_base_cache[key] = fields
+        self._upper_base_cache.move_to_end(key)
+        while len(self._upper_base_cache) > self._upper_base_cache_limit:
+            self._upper_base_cache.popitem(last=False)
+        return fields
+
+    def _ensure_pressure_orientation(self, frame_path: str, pressure: np.ndarray) -> str:
+        orient = self._pressure_orientation.get(frame_path)
+        if orient:
+            return orient
+        sample = pressure[:, pressure.shape[1] // 2, pressure.shape[2] // 2]
+        orient = 'ascending' if sample[0] <= sample[-1] else 'descending'
+        self._pressure_orientation[frame_path] = orient
+        return orient
+
+    @staticmethod
+    def _interp_column(target_pa: float, p_col: np.ndarray, f_col: np.ndarray) -> float:
+        valid = np.isfinite(p_col) & np.isfinite(f_col)
+        if valid.sum() < 2:
+            return np.nan
+        p_valid = p_col[valid]
+        f_valid = f_col[valid]
+        if p_valid[0] > p_valid[-1]:
+            order = np.argsort(p_valid)
+            p_valid = p_valid[order]
+            f_valid = f_valid[order]
+        if target_pa < p_valid[0]:
+            if np.isclose(target_pa, p_valid[0]):
+                return float(f_valid[0])
+            return np.nan
+        if target_pa > p_valid[-1]:
+            return np.nan
+        return float(np.interp(target_pa, p_valid, f_valid, left=np.nan, right=np.nan))
+
+    def _interp_to_pressure(self, field: np.ndarray, pressure: np.ndarray, level_hpa: float, frame_path: str) -> np.ndarray:
+        target_pa = float(level_hpa * 100.0)
+        orient = self._ensure_pressure_orientation(frame_path, pressure)
+        if orient == 'descending':
+            pressure = pressure[::-1, :, :]
+            field = field[::-1, :, :]
+        if field.shape != pressure.shape:
+            min_dims = tuple(min(fs, ps) for fs, ps in zip(field.shape, pressure.shape))
+            field = field[tuple(slice(0, m) for m in min_dims)]
+            pressure = pressure[tuple(slice(0, m) for m in min_dims)]
+
+        pressure = np.ascontiguousarray(pressure, dtype=float32)
+        field = np.ascontiguousarray(field, dtype=float32)
+        nz, ny, nx = pressure.shape
+        cols = np.moveaxis(pressure, 0, -1).reshape(-1, nz)
+        vals = np.moveaxis(field, 0, -1).reshape(-1, nz)
+
+        finite_mask = np.all(np.isfinite(cols), axis=1) & np.all(np.isfinite(vals), axis=1)
+        monotonic_mask = np.all(np.diff(cols, axis=1) >= -1e-3, axis=1)
+        valid_cols = finite_mask & monotonic_mask
+
+        out_flat = np.full(cols.shape[0], np.nan, dtype=float32)
+        if np.any(valid_cols):
+            p_valid = cols[valid_cols]
+            f_valid = vals[valid_cols]
+            upper_mask = p_valid >= target_pa
+            has_upper = upper_mask.any(axis=1)
+            idx_upper = np.argmax(upper_mask, axis=1)
+
+            valid_results = np.full(p_valid.shape[0], np.nan, dtype=float32)
+
+            # Exact matches at the first level
+            exact_first = has_upper & (idx_upper == 0) & np.isclose(p_valid[:, 0], target_pa)
+            if np.any(exact_first):
+                valid_results[exact_first] = f_valid[exact_first, 0].astype(float32)
+
+            usable = has_upper & (idx_upper > 0)
+            if np.any(usable):
+                sel_rows = np.where(usable)[0]
+                upper_idx = idx_upper[usable]
+                lower_idx = upper_idx - 1
+                p1 = p_valid[sel_rows, lower_idx]
+                p2 = p_valid[sel_rows, upper_idx]
+                f1 = f_valid[sel_rows, lower_idx]
+                f2 = f_valid[sel_rows, upper_idx]
+                denom = p2 - p1
+                interp_vals = np.empty_like(p1, dtype=float32)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    frac = (target_pa - p1) / denom
+                    interp_vals = f1 + frac * (f2 - f1)
+                zero_denom = np.abs(denom) < 1e-6
+                if np.any(zero_denom):
+                    interp_vals = interp_vals.astype(float32)
+                    interp_vals[zero_denom] = f1[zero_denom].astype(float32)
+                valid_results[sel_rows] = interp_vals.astype(float32)
+
+            out_flat[valid_cols] = valid_results
+
+        invalid_cols = ~valid_cols
+        if np.any(invalid_cols):
+            idxs = np.where(invalid_cols)[0]
+            for i, idx in enumerate(idxs):
+                out_flat[idx] = float32(
+                    self._interp_column(target_pa, cols[idxs[i]], vals[idxs[i]])
+                )
+
+        return out_flat.reshape(ny, nx)
+
+    def is_upper_air(self, var: str) -> bool:
+        return var.upper() in UPPER_AIR_SPECS
+
+    def get_upper_air_data(self, frame: WRFFrame, var: str) -> UpperAirData:
+        v = var.upper()
+        if v not in UPPER_AIR_SPECS:
+            raise RuntimeError(f'Unknown upper air variable "{var}"')
+        key = (frame.path, f'UPPER:{v}', frame.time_index)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        spec = UPPER_AIR_SPECS[v]
+        base_fields = self._get_upper_base_fields(frame)
+        pressure = base_fields['pressure']
+
+        scalar3d = base_fields.get(spec.shading_field)
+        if scalar3d is None:
+            raise RuntimeError(f'Missing shading field "{spec.shading_field}" for {var}')
+        scalar2d = self._interp_to_pressure(scalar3d, pressure, spec.level_hpa, frame.path)
+
+        contour2d = None
+        if spec.contour_field:
+            contour3d = base_fields.get(spec.contour_field)
+            if contour3d is None:
+                raise RuntimeError(f'Missing contour field "{spec.contour_field}" for {var}')
+            contour2d = self._interp_to_pressure(contour3d, pressure, spec.level_hpa, frame.path)
+
+        u2d = self._interp_to_pressure(base_fields['u'], pressure, spec.level_hpa, frame.path)
+        v2d = self._interp_to_pressure(base_fields['v'], pressure, spec.level_hpa, frame.path)
+
+        data = UpperAirData(
+            scalar=scalar2d.astype(float32),
+            contour=None if contour2d is None else contour2d.astype(float32),
+            u=u2d.astype(float32),
+            v=v2d.astype(float32),
+        )
+        self._cache[key] = data
+        return data
+
     # --- Preload API (helpers) ---
     def allocate_preload(self, var: str, level_hpa: T.Optional[float]) -> None:
         key = (var.upper(), float(level_hpa) if level_hpa is not None else None)
         if key not in self.preloaded:
             self.preloaded[key] = [None] * len(self.frames)
             
-    def set_preloaded(self, var: str, level_hpa: T.Optional[float], idx: int, data: np.ndarray) -> None:
+    def set_preloaded(self, var: str, level_hpa: T.Optional[float], idx: int, data: T.Any) -> None:
         key = (var.upper(), float(level_hpa) if level_hpa is not None else None)
         self.preloaded.setdefault(key, [None] * len(self.frames))
         self.preloaded[key][idx] = data
-    
-    def get_preloaded(self, var: str, level_hpa: T.Optional[float], idx: int) -> T.Optional[np.ndarray]:
+
+    def get_preloaded(self, var: str, level_hpa: T.Optional[float], idx: int) -> T.Optional[T.Any]:
         key = (var.upper(), float(level_hpa) if level_hpa is not None else None)
         li = self.preloaded.get(key)
         return None if li is None else li[idx]
@@ -281,7 +585,10 @@ class PreloadWorker(QtCore.QObject):
             n = len(self.loader.frames)
             self.loader.allocate_preload(self.var, self.level_hpa)
             for i, fr in enumerate(self.loader.frames):
-                data = self.loader.get2d(fr, self.var, self.level_hpa)
+                if self.loader.is_upper_air(self.var):
+                    data = self.loader.get_upper_air_data(fr, self.var)
+                else:
+                    data = self.loader.get2d(fr, self.var, self.level_hpa)
                 self.loader.set_preloaded(self.var, self.level_hpa, i, data)
                 self.progress.emit(int((i + 1) * 100 / max(1, n)))
             self.finished.emit()
@@ -298,6 +605,7 @@ class WRFViewer(QMainWindow):
         #self.resize(1200, 800)
         
         self.loader = WRFLoader()
+        self.upper_air_specs = UPPER_AIR_SPECS
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(100) # ms
         self.timer.timeout.connect(self._tick)
@@ -329,6 +637,7 @@ class WRFViewer(QMainWindow):
                 ('REFL1KM', 'REFL1KM'),
             ],
             'Upper Air': [
+                *[(spec.display_name, spec.canonical) for spec in UPPER_AIR_SPECS.values()],
                 ('REFL1KM', 'REFL1KM'),
             ],
         }
@@ -481,6 +790,9 @@ class WRFViewer(QMainWindow):
         self._img_art = None
         self._cbar = None
         self._img_shape = None
+        self._contour_sets: list = []
+        self._contour_labels: list = []
+        self._barb_art = None
         
         # Basemap Features
         self.ax.add_feature(cfeature.COASTLINE.with_scale('50m'), linewidth=0.6)
@@ -676,7 +988,8 @@ class WRFViewer(QMainWindow):
         self.status.showMessage(f'Preloading {display_var}')
 
         self.worker_thread = QtCore.QThread(self)
-        self.worker = PreloadWorker(self.loader, var, None)
+        level = UPPER_AIR_SPECS[var].level_hpa if var in UPPER_AIR_SPECS else None
+        self.worker = PreloadWorker(self.loader, var, level)
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.pb.setValue)
@@ -717,18 +1030,22 @@ class WRFViewer(QMainWindow):
         
         display_var = self.current_var_label
         var = self._canonical_var(display_var)
-        level = None
+        spec = self.upper_air_specs.get(var)
+        level = spec.level_hpa if spec else None
 
-        data = self.loader.get_preloaded(var, None, idx)
-        if data is None:
+        data_obj = self.loader.get_preloaded(var, level, idx)
+        if data_obj is None:
             try:
-                data = self.loader.get2d(frame, var, None)
+                if spec:
+                    data_obj = self.loader.get_upper_air_data(frame, var)
+                else:
+                    data_obj = self.loader.get2d(frame, var, None)
             except Exception as e:
                 QMessageBox.critical(self, 'Plot error', str(e))
                 return
-        
+
         lat, lon = self.loader.get_geo(frame)
-        
+
         if not hasattr(self, '_extent_set') or not self._extent_set:
             ymin, ymax = float(np.nanmin(lat)), float(np.nanmax(lat))
             xmin, xmax = float(np.nanmin(lon)), float(np.nanmax(lon))
@@ -736,14 +1053,37 @@ class WRFViewer(QMainWindow):
             dx = (xmax - xmin) * 0.05
             self.ax.set_extent([xmin - dx, xmax + dx, ymin - dy, ymax + dy], crs=ccrs.PlateCarree())
             self._extent_set = True
-        
+
+        if spec:
+            if not isinstance(data_obj, UpperAirData):
+                data_obj = self.loader.get_upper_air_data(frame, var)
+            data = np.asarray(data_obj.scalar)
+        else:
+            data = np.asarray(data_obj)
+
         data = np.squeeze(data)
+        plot_lat = lat
+        plot_lon = lon
         if data.shape != lat.shape:
-            ny, nx = lat.shape
-            data = data[:ny, :nx]
-        
-        vmin, vmax, label = self._default_range(var)
-        
+            ny = min(data.shape[0], lat.shape[0]) if data.ndim >= 1 else lat.shape[0]
+            nx = min(data.shape[1], lat.shape[1]) if data.ndim >= 2 else lat.shape[1]
+            plot_lat = lat[:ny, :nx]
+            plot_lon = lon[:ny, :nx]
+            if data.ndim >= 2:
+                data = data[:ny, :nx]
+            elif data.ndim == 1:
+                data = data[:ny]
+            else:
+                data = np.resize(data, (ny, nx))
+        else:
+            ny, nx = plot_lat.shape
+
+        if spec:
+            vmin, vmax = spec.vmin, spec.vmax
+            label = spec.colorbar_label
+        else:
+            vmin, vmax, label = self._default_range(var)
+
         # Create once /then resure for speed
         if self._img_art is None or self._img_shape != data.shape:
             if self._img_art is not None:
@@ -751,9 +1091,9 @@ class WRFViewer(QMainWindow):
                     self._img_art.remove()
                 except Exception:
                     pass
-            
+
             self._img_art = self.ax.pcolormesh(
-                lon, lat, data,
+                plot_lon, plot_lat, data,
                 transform=ccrs.PlateCarree(),
                 cmap=self.current_cmap,
                 shading='nearest',
@@ -762,7 +1102,7 @@ class WRFViewer(QMainWindow):
                 rasterized=True,
             )
             self._img_shape = data.shape
-            
+
             if self._cbar is None:
                 self._cbar = self.fig.colorbar(self._img_art, ax=self.ax, orientation='vertical', shrink=0.8, pad=0.02)
             self._cbar.set_label(label)
@@ -775,10 +1115,15 @@ class WRFViewer(QMainWindow):
                 self._img_art.set_clim(vmin, vmax)
             self._cbar.update_normal(self._img_art)
             self._cbar.set_label(label)
-            
+
+        if spec:
+            self._draw_upper_air_overlays(plot_lat, plot_lon, data_obj, spec)
+        else:
+            self._clear_upper_air_artists()
+
         self.ax.set_title(self._title_text(display_var, var), loc='center', fontsize=12, fontweight='bold')
         self.canvas.draw_idle()
-        
+
     def _default_range(self, var: str) -> tuple[T.Optional[float], T.Optional[float], str]:
         v = var.upper()
         if v in ('MDBZ', 'MAXDBZ'):
@@ -790,14 +1135,126 @@ class WRFViewer(QMainWindow):
         if v == 'REFL1KM':
             return 0.0, 70.0, 'Reflectivity @ 1km AGL (dBZ)'
         return None, None, var
-    
+
     def _title_text(self, display_var: str, canonical_var: str) -> str:
         v = canonical_var.upper()
+        if v in self.upper_air_specs:
+            spec = self.upper_air_specs[v]
+            return spec.title or display_var
         if v in ('MDBZ', 'MAXDBZ'):
             return 'MDBZ (Column Max dBZ)'
         if v == 'REFL1KM':
             return 'Reflectivity @ 1 km AGL (dBZ)'
         return display_var
+
+    def _clear_upper_air_artists(self):
+        if self._contour_sets:
+            for cs in self._contour_sets:
+                try:
+                    remover = getattr(cs, 'remove', None)
+                    if callable(remover):
+                        remover()
+                        continue
+                except Exception:
+                    pass
+                try:
+                    for coll in getattr(cs, 'collections', []) or []:
+                        try:
+                            coll.remove()
+                        except Exception:
+                            pass
+                    for txt in getattr(cs, 'labelTexts', []) or []:
+                        try:
+                            txt.remove()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            self._contour_sets.clear()
+        if self._contour_labels:
+            for label in self._contour_labels:
+                try:
+                    label.remove()
+                except Exception:
+                    pass
+            self._contour_labels.clear()
+        if self._barb_art is not None:
+            try:
+                self._barb_art.remove()
+            except Exception:
+                pass
+            self._barb_art = None
+
+    def _draw_upper_air_overlays(self, lat: np.ndarray, lon: np.ndarray, data: UpperAirData, spec: UpperAirSpec) -> None:
+        self._clear_upper_air_artists()
+
+        contour_data = data.contour
+        if contour_data is not None and spec.contour_field:
+            contour_arr = np.asarray(contour_data)
+            contour_arr = np.squeeze(contour_arr)
+            if contour_arr.shape != lat.shape:
+                ny = min(contour_arr.shape[0], lat.shape[0]) if contour_arr.ndim >= 1 else lat.shape[0]
+                nx = min(contour_arr.shape[1], lat.shape[1]) if contour_arr.ndim >= 2 else lat.shape[1]
+                contour_arr = contour_arr[:ny, :nx]
+                lat = lat[:ny, :nx]
+                lon = lon[:ny, :nx]
+            contour_kwargs = {
+                'colors': spec.contour_color,
+                'linewidths': spec.contour_width,
+                'transform': ccrs.PlateCarree(),
+            }
+            if spec.contour_levels is not None:
+                contour_kwargs['levels'] = spec.contour_levels
+            try:
+                cs = self.ax.contour(
+                    lon,
+                    lat,
+                    contour_arr,
+                    **contour_kwargs,
+                )
+            except ValueError:
+                cs = None
+            if cs is not None:
+                self._contour_sets.append(cs)
+                if spec.contour_field == 'height':
+                    try:
+                        labels = self.ax.clabel(cs, fmt='%d', fontsize=8)
+                    except Exception:
+                        labels = []
+                    if labels:
+                        self._contour_labels.extend(labels)
+
+        stride = max(1, spec.barb_stride)
+        u = np.asarray(data.u)
+        v = np.asarray(data.v)
+        u = np.squeeze(u)
+        v = np.squeeze(v)
+        if u.shape != lat.shape:
+            ny = min(u.shape[0], lat.shape[0]) if u.ndim >= 1 else lat.shape[0]
+            nx = min(u.shape[1], lat.shape[1]) if u.ndim >= 2 else lat.shape[1]
+            u = u[:ny, :nx]
+            v = v[:ny, :nx]
+            lat = lat[:ny, :nx]
+            lon = lon[:ny, :nx]
+        sl = (slice(None, None, stride), slice(None, None, stride))
+        barb_lon = lon[sl]
+        barb_lat = lat[sl]
+        barb_u = u[sl]
+        barb_v = v[sl]
+        if barb_lon.size and barb_lat.size:
+            try:
+                self._barb_art = self.ax.barbs(
+                    barb_lon,
+                    barb_lat,
+                    barb_u,
+                    barb_v,
+                    length=spec.barb_length,
+                    color=spec.barb_color,
+                    linewidth=0.6,
+                    transform=ccrs.PlateCarree(),
+                )
+            except Exception:
+                self._barb_art = None
         
     # ---------------
     # Utilities
