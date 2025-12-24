@@ -5,7 +5,7 @@ WRF Viewer - Single file desktop app (PySide6 + Matplotlib + Cartopy)
 
 Features (MVP)
     - Open one or many wrfout_* NetCDF files (concatenated in time order).
-    - Variables: MDBZ, RAINNC, RAINC, WSPD10, REFL1KM.
+    - Variables: MDBZ, RAINNC, RAINC, WSPD10, REFL1KM, 2 m Temp (°F).
     - Time slider with smooth live redraw (debounced) + play/pause animation.
     - Colormap dropdown
     - Export current frame as PNG.
@@ -20,6 +20,7 @@ from __future__ import annotations
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import glob
+import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.transforms as mtransforms
@@ -688,6 +689,17 @@ class WRFLoader(QtCore.QObject):
                 u10 = np.array(nc.variables['U10'][frame.time_index, :, :])
                 v10 = np.array(nc.variables['V10'][frame.time_index, :, :])
                 data2d = np.hypot(u10, v10)
+            elif v == 'T2F':
+                if 'T2' not in nc.variables:
+                    raise RuntimeError('Variable "T2" not found; cannot compute 2 m temperature')
+                t2_var = nc.variables['T2']
+                dims = tuple(getattr(t2_var, 'dimensions', ()))
+                if 'Time' in dims:
+                    t2k = np.array(t2_var[frame.time_index, :, :])
+                else:
+                    t2k = np.array(t2_var[:, :])
+                t2c = t2k - 273.15
+                data2d = (t2c * 9.0 / 5.0) + 32.0
             elif v == 'PTYPE':
                 data2d = self._precip_type_field(frame)
             elif v == 'REFL1KM':
@@ -846,6 +858,7 @@ class WRFViewer(QMainWindow):
                 ('Total Rain Accumulation', 'RAINNC'),
                 ('RAINC', 'RAINC'),
                 ('10 m AGL Wind', 'WSPD10'),
+                ('2 m Temperature (°F)', 'T2F'),
                 ('Precipitation Type', 'PTYPE'),
             ],
             'Severe': [
@@ -1019,6 +1032,7 @@ class WRFViewer(QMainWindow):
         self._contour_sets: list = []
         self._contour_labels: list = []
         self._barb_art = None
+        self._value_labels: list[matplotlib.text.Text] = []
         
         # Basemap Features
         self.ax.add_feature(cfeature.COASTLINE.with_scale('50m'), linewidth=0.6)
@@ -1378,8 +1392,9 @@ class WRFViewer(QMainWindow):
             self._clear_upper_air_artists()
             
         self.ax.set_title(self._title_text(display_var, var), loc='center', fontsize=12, fontweight='bold')
+        self._draw_value_labels(plot_lat, plot_lon, data, var)
         self.canvas.draw_idle()
-        
+
     def _default_range(self, var: str) -> tuple[T.Optional[float], T.Optional[float], str]:
         v = var.upper()
         if v in ('MDBZ', 'MAXDBZ'):
@@ -1388,6 +1403,8 @@ class WRFViewer(QMainWindow):
             return 0.0, None, 'Accumulated Precip (mm)'
         if v in ('WSPD10', 'WIND10'):
             return 0.0, 40.0, '10-m wind speed (m s$^{-1}$)'
+        if v == 'T2F':
+            return -60.0, 120.0, '2-m temperature (°F)'
         if v == 'REFL1KM':
             return 0.0, 70.0, 'Reflectivity @ 1km AGL (dBZ)'
         if v == 'PTYPE':
@@ -1408,6 +1425,8 @@ class WRFViewer(QMainWindow):
             return 'Reflectivity @ 1 km AGL (dBZ)'
         if v == 'PTYPE':
             return 'Precipitation Type'
+        if v == 'T2F':
+            return '2 m Temperature (°F)'
         return display_var
     
     def _precip_type_style(self) -> tuple[ListedColormap, BoundaryNorm, list[int], list[str]]:
@@ -1499,6 +1518,57 @@ class WRFViewer(QMainWindow):
             
         if moved:
             ax.figure.canvas.draw_idle()
+
+    def _clear_value_labels(self) -> None:
+        if not self._value_labels:
+            return
+        for label in self._value_labels:
+            try:
+                label.remove()
+            except Exception:
+                pass
+        self._value_labels.clear()
+
+    def _draw_value_labels(self, lat: np.ndarray, lon: np.ndarray, data: np.ndarray, var: str) -> None:
+        self._clear_value_labels()
+        if var.upper() != 'T2F':
+            return
+
+        arr = np.asarray(data)
+        if arr.ndim < 2:
+            return
+        arr = np.squeeze(arr)
+        if arr.ndim != 2:
+            return
+
+        lat_arr = np.asarray(lat)
+        lon_arr = np.asarray(lon)
+        if lat_arr.shape != arr.shape or lon_arr.shape != arr.shape:
+            ny = min(arr.shape[0], lat_arr.shape[0], lon_arr.shape[0])
+            nx = min(arr.shape[1], lat_arr.shape[1], lon_arr.shape[1])
+            arr = arr[:ny, :nx]
+            lat_arr = lat_arr[:ny, :nx]
+            lon_arr = lon_arr[:ny, :nx]
+
+        stride = 5
+        start_y = stride if arr.shape[0] > 1 else 0
+        start_x = stride if arr.shape[1] > 1 else 0
+        for iy in range(start_y, arr.shape[0], stride):
+            for ix in range(start_x, arr.shape[1], stride):
+                val = arr[iy, ix]
+                if not np.isfinite(val):
+                    continue
+                txt = self.ax.text(
+                    lon_arr[iy, ix],
+                    lat_arr[iy, ix],
+                    f'{val:.0f}',
+                    transform=ccrs.PlateCarree(),
+                    fontsize=6,
+                    ha='center',
+                    va='center',
+                    color='black',
+                )
+                self._value_labels.append(txt)
     
     def _reset_colorbar_ticks(self) -> None:
         if not self._cbar:
