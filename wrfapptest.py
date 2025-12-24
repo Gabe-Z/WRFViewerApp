@@ -31,6 +31,7 @@ import sys
 import typing as T
 
 from dataclasses import dataclass
+from datetime import datetime
 from collections import OrderedDict
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
@@ -182,6 +183,15 @@ class WRFLoader(QtCore.QObject):
     @staticmethod
     def _log_debug(msg: str) -> None:
         print(msg, file=sys.stderr, flush=True)
+
+    @staticmethod
+    def _format_timestamp(ts: str) -> str:
+        ts_clean = ts.replace('_', ' ')
+        try:
+            dt = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M:%S')
+            return dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+        except ValueError:
+            return ts
     
     # --- Loading and Indexing ---
     def open_files(self, paths: list[str]) -> None:
@@ -206,7 +216,8 @@ class WRFLoader(QtCore.QObject):
                 times_arr = nc.variables['Times'][:]
                 for ti in range(times_arr.shape[0]):
                     ts = times_arr[ti].tobytes().decode('utf-8').strip().replace('\x00', '')
-                    frames.append(WRFFrame(path=fp, time_index=ti, timestamp_str=ts))
+                    formatted_ts = self._format_timestamp(ts)
+                    frames.append(WRFFrame(path=fp, time_index=ti, timestamp_str=formatted_ts))
         frames.sort(key=lambda fr: (os.path.getmtime(fr.path), fr.time_index))
         self.frames = frames
         self._cache.clear()
@@ -936,6 +947,16 @@ class WRFViewer(QMainWindow):
         self.ax = plt.axes(projection=ccrs.PlateCarree())
         self.canvas = FigureCanvas(self.fig)
         self.toolbar = NavToolbar(self.canvas, self)
+        self._timestamp_text = self.fig.text(
+            0.02,
+            0.02,
+            '',
+            transform=self.fig.transFigure,
+            ha='left',
+            va='bottom',
+            fontsize=9,
+            bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.25'),
+        )
 
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
@@ -1232,6 +1253,7 @@ class WRFViewer(QMainWindow):
         idx = self.sld_time.value()
         frame = self.loader.frames[idx]
         self.lbl_time.setText(f'Time: {frame.timestamp_str}')
+        self._timestamp_text.set_text(f'WRF Gabe Zago  {frame.timestamp_str}')
         
         display_var = self.current_var_label
         var = self._canonical_var(display_var)
