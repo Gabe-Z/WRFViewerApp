@@ -82,6 +82,13 @@ class UpperAirData:
     contour: T.Optional[np.ndarray]
     u: np.ndarray
     v: np.ndarray
+
+
+@dataclass
+class SurfaceWindData:
+    scalar: np.ndarray
+    u: np.ndarray
+    v: np.ndarray
     
     
 # Use nearly a full step for intensity shading inside each precipitation
@@ -724,6 +731,38 @@ class WRFLoader(QtCore.QObject):
                 log_ratio = np.log(e_pa / 611.2)
                 td_c = (243.5 * log_ratio) / (17.67 - log_ratio)
                 data2d = (td_c * 9.0 / 5.0) + 32.0
+            elif v == 'RH2WIND10KT':
+                required = ['T2', 'Q2', 'PSFC', 'U10', 'V10']
+                missing = [name for name in required if name not in nc.variables]
+                if missing:
+                    raise RuntimeError(f'Missing required variables for 2 m RH / 10 m wind: {", ".join(missing)}')
+
+                def _slice(vname: str) -> np.ndarray:
+                    var = nc.variables[vname]
+                    dims = tuple(getattr(var, 'dimensions', ()))
+                    if 'Time' in dims:
+                        return np.array(var[frame.time_index, :, :])
+                    return np.array(var[:, :])
+
+                t2_k = _slice('T2')
+                q2 = _slice('Q2')
+                psfc = _slice('PSFC')
+                u10 = _slice('U10')
+                v10 = _slice('V10')
+
+                # Convert T2 (K) and mixing ratio to relative humidity (percent).
+                e_pa = (q2 * psfc) / (0.622 + q2)
+                e_pa = np.clip(e_pa, 1e-6, None)
+                tc = t2_k - 273.15
+                es_pa = 611.2 * np.exp((17.67 * tc) / (tc + 243.5))
+                rh = np.clip((e_pa / es_pa) * 100.0, 0.0, 100.0)
+
+                ms_to_kt = 1.9438444924406
+                data2d = SurfaceWindData(
+                    scalar=rh.astype(float32),
+                    u=(u10 * ms_to_kt).astype(float32),
+                    v=(v10 * ms_to_kt).astype(float32),
+                )
             elif v == 'PTYPE':
                 data2d = self._precip_type_field(frame)
             elif v == 'REFL1KM':
@@ -880,6 +919,7 @@ class WRFViewer(QMainWindow):
             'Surface': [
                 ('2 m AGL Temperature (°F)', 'T2F'),
                 ('2 m AGL Dewpoint (°F)', 'TD2F'),
+                ('2 m AGL Relative Humidity (%) with 10 m AGL Wind (kt) (Barb)', 'RH2WIND10KT'),
                 ('10 m AGL Wind', 'WSPD10'),
                 ('Precipitation Type', 'PTYPE'),
                 ('Total Rain Accumulation', 'RAINNC'),
@@ -1297,6 +1337,7 @@ class WRFViewer(QMainWindow):
         var = self._canonical_var(display_var)
         spec = self.upper_air_specs.get(var)
         level = spec.level_hpa if spec else None
+        vector_data: T.Optional[SurfaceWindData] = None
 
         data_obj = self.loader.get_preloaded(var, level, idx)
         if data_obj is None:
@@ -1318,13 +1359,14 @@ class WRFViewer(QMainWindow):
             dx = (xmax - xmin) * 0.05
             self.ax.set_extent([xmin - dx, xmax + dx, ymin - dy, ymax + dy], crs=ccrs.PlateCarree())
             self._extent_set = True
-        
+
         if spec:
             if not isinstance(data_obj, UpperAirData):
                 data_obj = self.loader.get_upper_air_data(frame, var)
             data = np.asarray(data_obj.scalar)
         else:
-            data = np.asarray(data_obj)
+            vector_data = data_obj if isinstance(data_obj, SurfaceWindData) else None
+            data = np.asarray(data_obj.scalar if isinstance(data_obj, SurfaceWindData) else data_obj)
         
         data = np.squeeze(data)
         plot_lat = lat
@@ -1412,6 +1454,8 @@ class WRFViewer(QMainWindow):
         
         if spec:
             self._draw_upper_overlays(plot_lat, plot_lon, data_obj, spec)
+        elif vector_data is not None:
+            self._draw_surface_barbs(plot_lat, plot_lon, vector_data)
         else:
             self._clear_upper_air_artists()
             
@@ -1427,6 +1471,8 @@ class WRFViewer(QMainWindow):
             return 0.0, None, 'Accumulated Precip (mm)'
         if v in ('WSPD10', 'WIND10'):
             return 0.0, 40.0, '10-m wind speed (m s$^{-1}$)'
+        if v == 'RH2WIND10KT':
+            return 0.0, 100.0, '2-m Relative Humidity (%)'
         if v == 'T2F':
             return -60.0, 120.0, '2-m temperature (°F)'
         if v == 'TD2F':
@@ -1451,6 +1497,8 @@ class WRFViewer(QMainWindow):
             return 'Reflectivity @ 1 km AGL (dBZ)'
         if v == 'PTYPE':
             return 'Precipitation Type'
+        if v == 'RH2WIND10KT':
+            return '2 m Relative Humidity & 10 m Wind (kt)'
         if v == 'T2F':
             return '2 m Temperature (°F)'
         if v == 'TD2F':
@@ -1646,6 +1694,47 @@ class WRFViewer(QMainWindow):
             except Exception:
                 pass
             self._barb_art = None
+
+    def _draw_surface_barbs(self, lat: np.ndarray, lon: np.ndarray, data: SurfaceWindData) -> None:
+        self._clear_upper_air_artists()
+
+        stride = 12
+        barb_length = 5.5
+        barb_color = 'black'
+
+        u = np.asarray(data.u)
+        v = np.asarray(data.v)
+        u = np.squeeze(u)
+        v = np.squeeze(v)
+        if u.shape != lat.shape:
+            ny = min(u.shape[0], lat.shape[0]) if u.ndim >= 1 else lat.shape[0]
+            nx = min(u.shape[1], lat.shape[1]) if u.ndim >= 2 else lat.shape[1]
+            u = u[:ny, :nx]
+            v = v[:ny, :nx]
+            lat = lat[:ny, :nx]
+            lon = lon[:ny, :nx]
+
+        start_y = stride if lat.shape[0] > 1 else 0
+        start_x = stride if lon.shape[1] > 1 else 0
+        sl = (slice(start_y, None, stride), slice(start_x, None, stride))
+        barb_lon = lon[sl]
+        barb_lat = lat[sl]
+        barb_u = u[sl]
+        barb_v = v[sl]
+        if barb_lon.size and barb_lat.size:
+            try:
+                self._barb_art = self.ax.barbs(
+                    barb_lon,
+                    barb_lat,
+                    barb_u,
+                    barb_v,
+                    length=barb_length,
+                    color=barb_color,
+                    linewidth=0.6,
+                    transform=ccrs.PlateCarree(),
+                )
+            except Exception:
+                self._barb_art = None
     
     def _draw_upper_overlays(self, lat: np.ndarray, lon: np.ndarray, data: UpperAirData, spec: UpperAirData) -> None:
         self._clear_upper_air_artists()
@@ -1698,7 +1787,9 @@ class WRFViewer(QMainWindow):
             v = v[:ny, :nx]
             lat = lat[:ny, :nx]
             lon = lon[:ny, :nx]
-        sl = (slice(None, None, stride), slice(None, None, stride))
+        start_y = stride if lat.shape[0] > 1 else 0
+        start_x = stride if lon.shape[1] > 1 else 0
+        sl = (slice(start_y, None, stride), slice(start_x, None, stride))
         barb_lon = lon[sl]
         barb_lat = lat[sl]
         barb_u = u[sl]
