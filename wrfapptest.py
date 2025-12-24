@@ -856,6 +856,8 @@ class WRFViewer(QMainWindow):
             'Surface': [
                 ('2 m Temperature (°F)', 'T2F'),
                 ('10 m AGL Wind', 'WSPD10'),
+                ('2 m Temperature (°F)', 'T2F'),
+                ('2 m AGL Dewpoint (°F)', 'TD2F'),
                 ('Precipitation Type', 'PTYPE'),
                 ('Total Rain Accumulation', 'RAINNC'),
                 ('Composite Reflectivity', 'MDBZ'),
@@ -1393,7 +1395,7 @@ class WRFViewer(QMainWindow):
         self.ax.set_title(self._title_text(display_var, var), loc='center', fontsize=12, fontweight='bold')
         self._draw_value_labels(plot_lat, plot_lon, data, var)
         self.canvas.draw_idle()
-        
+
     def _default_range(self, var: str) -> tuple[T.Optional[float], T.Optional[float], str]:
         v = var.upper()
         if v in ('MDBZ', 'MAXDBZ'):
@@ -1517,6 +1519,57 @@ class WRFViewer(QMainWindow):
             
         if moved:
             ax.figure.canvas.draw_idle()
+
+    def _clear_value_labels(self) -> None:
+        if not self._value_labels:
+            return
+        for label in self._value_labels:
+            try:
+                label.remove()
+            except Exception:
+                pass
+        self._value_labels.clear()
+
+    def _draw_value_labels(self, lat: np.ndarray, lon: np.ndarray, data: np.ndarray, var: str) -> None:
+        self._clear_value_labels()
+        if var.upper() not in {'T2F', 'TD2F'}:
+            return
+
+        arr = np.asarray(data)
+        if arr.ndim < 2:
+            return
+        arr = np.squeeze(arr)
+        if arr.ndim != 2:
+            return
+
+        lat_arr = np.asarray(lat)
+        lon_arr = np.asarray(lon)
+        if lat_arr.shape != arr.shape or lon_arr.shape != arr.shape:
+            ny = min(arr.shape[0], lat_arr.shape[0], lon_arr.shape[0])
+            nx = min(arr.shape[1], lat_arr.shape[1], lon_arr.shape[1])
+            arr = arr[:ny, :nx]
+            lat_arr = lat_arr[:ny, :nx]
+            lon_arr = lon_arr[:ny, :nx]
+
+        stride = 5
+        start_y = stride if arr.shape[0] > 1 else 0
+        start_x = stride if arr.shape[1] > 1 else 0
+        for iy in range(start_y, arr.shape[0], stride):
+            for ix in range(start_x, arr.shape[1], stride):
+                val = arr[iy, ix]
+                if not np.isfinite(val):
+                    continue
+                txt = self.ax.text(
+                    lon_arr[iy, ix],
+                    lat_arr[iy, ix],
+                    f'{val:.0f}',
+                    transform=ccrs.PlateCarree(),
+                    fontsize=6,
+                    ha='center',
+                    va='center',
+                    color='black',
+                )
+                self._value_labels.append(txt)
     
     def _clear_value_labels(self) -> None:
         if not self._value_labels:
