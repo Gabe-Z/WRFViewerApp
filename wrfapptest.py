@@ -21,6 +21,9 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import glob
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import matplotlib.transforms as mtransforms
+import matplotlib.ticker as mticker
 import numpy as np
 import os
 import shutil
@@ -31,7 +34,7 @@ from dataclasses import dataclass
 from collections import OrderedDict
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavToolbar
-from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap, Normalize
 from numpy import float32
 from netCDF4 import Dataset
 from pathlib import Path
@@ -77,7 +80,33 @@ class UpperAirData:
     contour: T.Optional[np.ndarray]
     u: np.ndarray
     v: np.ndarray
-    
+
+
+# Use nearly a full step for intensity shading inside each precipitation
+# category so the colorbar ticks (0.0, 0.01, 0.05, 0.25, 0.5 in/hr) land at the
+# expected quarter/half/three-quarter heights of each band (0.0 at the base,
+# 0.5 near the top). Leave a tiny margin below 1.0 to avoid crossing the next
+# category boundary when values are clipped.
+PTYPE_INTENSITY_SPAN = 0.995
+PTYPE_MAX_RATE_INHR = 0.5
+
+
+def _ptype_rate_offset(rate: np.ndarray | float) -> np.ndarray | float:
+    """Map precipitation rate (in/hr) to an intensity offset inside the band.
+
+    Rates are clamped to [0, 0.5] in/hr and then interpolated so 0.01, 0.05,
+    0.25, and 0.5 in/hr land at 1/4, 1/2, 3/4, and full intensity respectively.
+    """
+
+    rate_arr = np.asarray(rate, dtype=float32)
+    break_rates = np.array([0.0, 0.01, 0.05, 0.25, PTYPE_MAX_RATE_INHR], dtype=float32)
+    break_positions = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=float32) * PTYPE_INTENSITY_SPAN
+    clamped = np.clip(rate_arr, break_rates[0], break_rates[-1])
+    offset = np.interp(clamped, break_rates, break_positions)
+    if np.isscalar(rate):
+        return float(offset)
+    return offset.astype(float32)
+
 
 UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
     'HGT500': UpperAirSpec(
@@ -149,6 +178,10 @@ class WRFLoader(QtCore.QObject):
         self._pressure_orientation: dict[str, str] = {}
         self._upper_base_cache: OrderedDict[tuple[str, int], dict[str, np.ndarray]] = OrderedDict()
         self._upper_base_cache_limit: int = 3
+
+    @staticmethod
+    def _log_debug(msg: str) -> None:
+        print(msg, file=sys.stderr, flush=True)
     
     # --- Loading and Indexing ---
     def open_files(self, paths: list[str]) -> None:
@@ -264,6 +297,36 @@ class WRFLoader(QtCore.QObject):
             qv = self._slice_time_var(nc.variables['QVAPOR'], frame.time_index)
             rh = self._calc_relative_humidity(temp_k, pressure, qv).astype(float32)
             wspd = np.hypot(u_mass, v_mass).astype(float32)
+
+        # Some WRF outputs carry different vertical counts across staggered fields
+        # (e.g., PH-derived height can be double the mass-level pressure count). Trim
+        # everything to the shallowest shared depth so downstream products (such as
+        # precipitation type) operate on aligned columns.
+        vert_depths = [
+            pressure.shape[0],
+            height.shape[0],
+            temp_c.shape[0],
+            rh.shape[0],
+            u_mass.shape[0],
+            v_mass.shape[0],
+            wspd.shape[0],
+        ]
+        common_levels = min(vert_depths)
+        if common_levels < 2:
+            raise RuntimeError('Insufficient vertical levels for upper-air calculations')
+
+        def _trim_to_levels(arr: np.ndarray) -> np.ndarray:
+            if arr.shape[0] == common_levels:
+                return arr
+            return arr[:common_levels, ...].astype(float32, copy=False)
+
+        pressure = _trim_to_levels(pressure)
+        height = _trim_to_levels(height)
+        temp_c = _trim_to_levels(temp_c)
+        rh = _trim_to_levels(rh)
+        u_mass = _trim_to_levels(u_mass)
+        v_mass = _trim_to_levels(v_mass)
+        wspd = _trim_to_levels(wspd)
         
         fields = {
             'pressure': pressure,
@@ -294,12 +357,12 @@ class WRFLoader(QtCore.QObject):
         valid = np.isfinite(p_col) & np.isfinite(f_col)
         if valid.sum() < 2:
             return np.nan
-        p_valid = p_valid[valid]
-        f_valid = f_valid[valid]
+        p_valid = p_col[valid]
+        f_valid = f_col[valid]
         if p_valid[0] > p_valid[-1]:
             order = np.argsort(p_valid)
             p_valid = p_valid[order]
-            f_valid = v_valid[order]
+            f_valid = f_valid[order]
         if target_pa < p_valid[0]:
             if np.isclose(target_pa, p_valid[0]):
                 return float(f_valid[0])
@@ -373,12 +436,151 @@ class WRFLoader(QtCore.QObject):
                 out_flat[idx] = float32(
                     self._interp_column(target_pa, cols[idxs[i]], vals[idxs[i]])
                 )
-        
+
         return out_flat.reshape(ny, nx)
-    
+
+    def _dbz_to_rate_inhr(self, dbz: np.ndarray) -> np.ndarray:
+        """Approximate precipitation rate (in/hr) from reflectivity (dBZ).
+
+        Uses a Marshall-Palmer Z-R relationship (Z = 200 R^1.6), converts to
+        mm/hr, then inches/hr. Negative/invalid dBZ values are clipped to keep
+        rates non-negative.
+        """
+        dbz = np.asarray(dbz, dtype=float32)
+        with np.errstate(over='ignore'):
+            z_lin = np.power(10.0, dbz * 0.1)
+        z_lin = np.clip(z_lin, 0.0, None)
+        rain_rate_mmhr = np.power(z_lin / 200.0, 1.0 / 1.6, dtype=float32)
+        return rain_rate_mmhr / 25.4
+
+    def _precip_type_field(self, frame: WRFFrame) -> np.ndarray:
+        key = (frame.path, 'PTYPE', frame.time_index)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+
+        base_fields = self._get_upper_base_fields(frame)
+        pressure = base_fields['pressure']
+        temp_c = base_fields['temperature']
+        height = base_fields['height']
+
+        self._log_debug(
+            f"PTYPE base shapes: pressure={pressure.shape}, temp={temp_c.shape}, height={height.shape}"
+        )
+
+        orient = self._ensure_pressure_orientation(frame.path, pressure)
+        surface_first = orient == 'descending'
+        self._log_debug(f"PTYPE orientation: {orient} (surface_first={surface_first})")
+        if not surface_first:
+            pressure = pressure[::-1, :, :]
+            temp_c = temp_c[::-1, :, :]
+            height = height[::-1, :, :]
+
+        # Ensure dimensions agree between height-derived thickness and temperature profiles.
+        # Some WRF outputs carry off-by-one counts vertically or horizontally between
+        # staggered grids. Align everything to the shallowest shared depth and smallest
+        # horizontal extents before computing totals.
+        nz = min(temp_c.shape[0], height.shape[0], pressure.shape[0])
+        ny = min(temp_c.shape[1], height.shape[1], pressure.shape[1])
+        nx = min(temp_c.shape[2], height.shape[2], pressure.shape[2])
+        if nz <= 1 or ny <= 1 or nx <= 1:
+            raise RuntimeError('Insufficient levels to determine precipitation type')
+
+        slicer = (slice(0, nz), slice(0, ny), slice(0, nx))
+        temp_c = np.ascontiguousarray(temp_c[slicer], dtype=float32)
+        height = np.ascontiguousarray(height[slicer], dtype=float32)
+        pressure = np.ascontiguousarray(pressure[slicer], dtype=float32)
+
+        self._log_debug(
+            f"PTYPE aligned shapes: pressure={pressure.shape}, temp={temp_c.shape}, height={height.shape}; nz={nz}, ny={ny}, nx={nx}"
+        )
+
+        layer_thickness = np.diff(height, axis=0, append=height[-1:, :, :])
+        layer_thickness = np.clip(layer_thickness, 0.0, None)
+
+        if layer_thickness.shape != temp_c.shape:
+            nz_energy = min(layer_thickness.shape[0], temp_c.shape[0])
+            ny_energy = min(layer_thickness.shape[1], temp_c.shape[1])
+            nx_energy = min(layer_thickness.shape[2], temp_c.shape[2])
+            layer_thickness = layer_thickness[:nz_energy, :ny_energy, :nx_energy]
+            temp_c = temp_c[:nz_energy, :ny_energy, :nx_energy]
+            pressure = pressure[:nz_energy, :ny_energy, :nx_energy]
+            self._log_debug(
+                f"PTYPE energy align: layer_thickness shape={layer_thickness.shape}, temp shape={temp_c.shape}, pressure shape={pressure.shape}"
+            )
+
+        warm_energy = np.sum(np.clip(temp_c, 0.0, None) * layer_thickness, axis=0)
+        cold_energy = np.sum(np.clip(-temp_c, 0.0, None) * layer_thickness, axis=0)
+        surface_temp = temp_c[0, :, :]
+        max_temp = temp_c.max(axis=0)
+
+        self._log_debug(
+            f"PTYPE energies: warm_energy shape={warm_energy.shape}, cold_energy shape={cold_energy.shape}, surface_temp shape={surface_temp.shape}, max_temp shape={max_temp.shape}"
+        )
+
+        ptype = np.zeros_like(surface_temp, dtype=np.int8)  # rain default
+
+        snow_mask = (max_temp <= 0.5) | (warm_energy < 5.0)
+
+        warm_ratio = warm_energy / np.clip(warm_energy + cold_energy, 1e-3, None)
+        warm_near_surface = surface_temp >= 1.0
+        strong_surface_warm = surface_temp >= 2.0
+        deep_warm = max_temp >= 1.5
+
+        sleet_mask = (
+            ~snow_mask
+            & (warm_energy > 8.0)
+            & (cold_energy >= warm_energy * 0.55)
+            & (surface_temp <= 0.5)
+        )
+
+        rain_mask = (
+            ~snow_mask
+            & ~sleet_mask
+            & (
+                strong_surface_warm
+                | (warm_near_surface & (warm_ratio >= 0.5))
+                | (deep_warm & (warm_ratio >= 0.45))
+                | (warm_energy >= cold_energy * 0.5)
+            )
+        )
+
+        mix_mask = ~(snow_mask | sleet_mask | rain_mask)
+
+        warm_lean_mix = mix_mask & (warm_ratio >= 0.45) & (surface_temp >= 0.5)
+        mix_mask = mix_mask & ~warm_lean_mix
+
+        ptype[snow_mask] = 1
+        ptype[mix_mask] = 2
+        ptype[sleet_mask] = 3
+
+        # Bias toward rain for low-elevation warm surfaces unless strong ice signals exist
+        surface_elev = height[0, :, :]
+        lowland_rain = (surface_elev <= 1200.0) & (surface_temp >= 0.5)
+        ptype[lowland_rain & ~snow_mask & ~sleet_mask] = 0
+
+        # Only classify where precipitation is present (MDBZ > 0); leave others transparent
+        try:
+            mdbz = self.get2d(frame, 'MDBZ')
+            if mdbz.shape != ptype.shape:
+                ny = min(mdbz.shape[0], ptype.shape[0])
+                nx = min(mdbz.shape[1], ptype.shape[1])
+                mdbz = np.ascontiguousarray(mdbz[:ny, :nx], dtype=float32)
+                ptype = ptype[:ny, :nx]
+            precip_mask = np.isfinite(mdbz) & (mdbz > 0.0)
+            rate_inhr = self._dbz_to_rate_inhr(mdbz)
+            rate_inhr = np.clip(rate_inhr, 0.0, PTYPE_MAX_RATE_INHR)
+            intensity = _ptype_rate_offset(rate_inhr)
+            ptype = np.where(precip_mask, ptype.astype(float32) + intensity, np.nan)
+        except Exception as exc:
+            self._log_debug(f"PTYPE: unable to apply precipitation mask ({exc})")
+
+        self._cache[key] = ptype.astype(float32)
+        return self._cache[key]
+
     def is_upper_air(self, var: str) -> bool:
         return var.upper() in UPPER_AIR_SPECS
-    
+
     def get_upper_air_data(self, frame: WRFFrame, var: str) -> UpperAirData:
         v = var.upper()
         if v not in UPPER_AIR_SPECS:
@@ -475,6 +677,8 @@ class WRFLoader(QtCore.QObject):
                 u10 = np.array(nc.variables['U10'][frame.time_index, :, :])
                 v10 = np.array(nc.variables['V10'][frame.time_index, :, :])
                 data2d = np.hypot(u10, v10)
+            elif v == 'PTYPE':
+                data2d = self._precip_type_field(frame)
             elif v == 'REFL1KM':
                 if 'REFL_10CM' in nc.variables:
                     refl_var = nc.variables['REFL_10CM']
@@ -631,6 +835,7 @@ class WRFViewer(QMainWindow):
                 ('RAINNC', 'RAINNC'),
                 ('RAINC', 'RAINC'),
                 ('WIND10', 'WSPD10'),
+                ('Precip Type', 'PTYPE'),
             ],
             'Severe': [
                 ('MDBZ', 'MDBZ'),
@@ -1083,7 +1288,17 @@ class WRFViewer(QMainWindow):
             label = spec.colorbar_label
         else:
             vmin, vmax, label = self._default_range(var)
-        
+
+        cmap_to_use = self.current_cmap
+        norm = None
+        tick_values: T.Optional[list[int]] = None
+        tick_labels: T.Optional[list[str]] = None
+        if var.upper() == 'PTYPE':
+            cmap_to_use, norm, tick_values, tick_labels = self._precip_type_style()
+            self.loader._log_debug(
+                f"PTYPE plot alignment: data shape={data.shape}, lat shape={plot_lat.shape}, lon shape={plot_lon.shape}, ticks={tick_values}"
+            )
+
         # Create once /then resure for speed
         if self._img_art is None or self._img_shape != data.shape:
             if self._img_art is not None:
@@ -1091,31 +1306,50 @@ class WRFViewer(QMainWindow):
                     self._img_art.remove()
                 except Exception:
                     pass
-            
+
             self._img_art = self.ax.pcolormesh(
                 plot_lon, plot_lat, data,
                 transform=ccrs.PlateCarree(),
-                cmap=self.current_cmap,
+                cmap=cmap_to_use,
+                norm=norm,
                 shading='nearest',
                 vmin=vmin, vmax=vmax,
                 antialiased=False,
                 rasterized=True,
             )
             self._img_shape = data.shape
-            
+
             if self._cbar is None:
                 self._cbar = self.fig.colorbar(self._img_art, ax=self.ax, orientation='vertical', shrink=0.8, pad=0.02)
             self._cbar.set_label(label)
+            if tick_values is not None and tick_labels is not None:
+                self._cbar.set_ticks(tick_values)
+                self._cbar.set_ticklabels(tick_labels)
+                if var.upper() == 'PTYPE':
+                    self._nudge_precip_type_ticks()
+            else:
+                self._reset_colorbar_ticks()
         else:
             # Update only face colors and limits
             # pcolormesh set_array expects one value per face; averaging corners is okay for speed.
             self._img_art.set_array(np.asarray(data).ravel())
-            self._img_art.set_cmap(self.current_cmap)
+            self._img_art.set_cmap(cmap_to_use)
+            if norm is not None:
+                self._img_art.set_norm(norm)
+            else:
+                self._img_art.set_norm(Normalize(vmin=vmin, vmax=vmax))
             if vmin is not None and vmax is not None:
                 self._img_art.set_clim(vmin, vmax)
             self._cbar.update_normal(self._img_art)
             self._cbar.set_label(label)
-        
+            if tick_values is not None and tick_labels is not None:
+                self._cbar.set_ticks(tick_values)
+                self._cbar.set_ticklabels(tick_labels)
+                if var.upper() == 'PTYPE':
+                    self._nudge_precip_type_ticks()
+            else:
+                self._reset_colorbar_ticks()
+
         if spec:
             self._draw_upper_overlays(plot_lat, plot_lon, data_obj, spec)
         else:
@@ -1134,8 +1368,13 @@ class WRFViewer(QMainWindow):
             return 0.0, 40.0, '10-m wind speed (m s$^{-1}$)'
         if v == 'REFL1KM':
             return 0.0, 70.0, 'Reflectivity @ 1km AGL (dBZ)'
+        if v == 'PTYPE':
+            # Keep the precipitation-type colorbar aligned to fixed 0-4 boundaries so
+            # each category begins at an integer tick (0=rain, 1=snow, 2=mix, 3=sleet)
+            # regardless of the intensity span we use inside each bucket.
+            return 0.0, 4.0, 'Precipitation Type (in/hr rates)'
         return None, None, var
-    
+
     def _title_text(self, display_var: str, canonical_var: str) -> str:
         v = canonical_var.upper()
         if v in self.upper_air_specs:
@@ -1145,8 +1384,111 @@ class WRFViewer(QMainWindow):
             return 'MDBZ (Column Max dBZ)'
         if v == 'REFL1KM':
             return 'Reflectivity @ 1 km AGL (dBZ)'
+        if v == 'PTYPE':
+            return 'Precipitation Type'
         return display_var
-    
+
+    def _precip_type_style(self) -> tuple[ListedColormap, Normalize, list[float], list[str]]:
+        if not hasattr(self, '_ptype_cmap'):
+            steps_per_type = 96
+            type_gradients = [
+                ['#d8f4d2', '#5fbf6b', '#0b5f2d'],  # Rain (darker green ramp)
+                ['#e5f0ff', '#74add1', '#6a51a3'],  # Snow
+                ['#fde0ef', '#f768a1', '#ae017e'],  # Mix / freezing
+                ['#f8e7ff', '#c994c7', '#6a3d9a'],  # Sleet
+            ]
+
+            def _ramp_list(colors: list[str], n: int) -> list[tuple[float, float, float]]:
+                cmap = mcolors.LinearSegmentedColormap.from_list('ptype_tmp', colors, N=n)
+                return [tuple(c[:3]) for c in cmap(np.linspace(0.0, 1.0, n))]
+
+            color_list: list[tuple[float, float, float]] = []
+            for colors in type_gradients:
+                color_list.extend(_ramp_list(colors, steps_per_type))
+
+            self._ptype_cmap = ListedColormap(color_list, name='PrecipTypeIntensity')
+
+            # Use a boundary norm so category starts always line up with integer values
+            # (0=rain, 1=snow, 2=mix, 3=sleet, 4=top). This prevents rain intensities
+            # from bleeding into the snow colors simply because the intensity span is
+            # narrower than the 1.0 spacing between category bases.
+            ncolors = len(color_list)
+            boundaries = np.linspace(0.0, 4.0, ncolors + 1)
+            self._ptype_norm = mcolors.BoundaryNorm(boundaries, ncolors=ncolors, clip=True)
+
+        # Keep the legend readable by labeling each precipitation type once and
+        # showing a handful of rate ticks beneath it. This avoids the cluttered
+        # "Type value" repetition that made the previous colorbar hard to read.
+        rate_ticks = [0.0, 0.01, 0.05, 0.25, 0.5]
+
+        def _offset(rate: float) -> float:
+            return float(_ptype_rate_offset(rate))
+
+        tick_values: list[float] = []
+        tick_labels: list[str] = []
+        for base, name in enumerate(['Rain', 'Snow', 'Mix', 'Sleet']):
+            for rate in rate_ticks:
+                tick_values.append(base + _offset(rate))
+                if rate == 0.0:
+                    tick_labels.append(f"{name} (in/hr)")
+                else:
+                    tick_labels.append(f"{rate:.2g}")
+
+        return self._ptype_cmap, self._ptype_norm, tick_values, tick_labels
+
+    def _nudge_precip_type_ticks(self) -> None:
+        """Shift the base (0.0) rate labels so they don't sit on neighboring ticks.
+
+        Users reported the 0.0 labels blending into adjacent 0.5 tick labels on the
+        precipitation-type colorbar. Move any 0.0-like tick text slightly to the
+        right and keep precipitation-type ticks on the right side of the colorbar so
+        they don't collide with the colorbar label or default range text.
+        """
+
+        if not self._cbar:
+            return
+
+        ax = self._cbar.ax
+        # Keep ticks on the right but avoid shoving every label away from the bar;
+        # only the long category labels should shift. Give numeric ticks a tiny
+        # nudge so they don't sit on top of the colorbar.
+        ax.tick_params(axis='y', which='both', labelright=True, labelleft=False, pad=3)
+        ax.yaxis.set_label_position('right')
+        ax.yaxis.labelpad = 12
+
+        # Matplotlib returns (transform, valign, halign); we only need the transform
+        base_transform = ax.get_yaxis_text2_transform(0)[0]
+        numeric_offset = mtransforms.offset_copy(base_transform, fig=ax.figure, x=6, units='points')
+        category_offset = mtransforms.offset_copy(base_transform, fig=ax.figure, x=16, units='points')
+        moved = False
+
+        for lbl in ax.get_yticklabels():
+            txt = lbl.get_text().strip()
+            # Reset every label to the default right-hand transform so numeric ticks
+            # stay pinned to the colorbar even if we nudge category labels.
+            lbl.set_transform(base_transform)
+            if 'in/hr' in txt:
+                lbl.set_transform(category_offset)
+                lbl.set_horizontalalignment('left')
+                moved = True
+            else:
+                lbl.set_transform(numeric_offset)
+                lbl.set_horizontalalignment('left')
+
+        if moved:
+            ax.figure.canvas.draw_idle()
+
+    def _reset_colorbar_ticks(self) -> None:
+        if not self._cbar:
+            return
+        locator = mticker.AutoLocator()
+        formatter = mticker.ScalarFormatter()
+        formatter.set_powerlimits((-6, 6))
+        self._cbar.ax.yaxis.set_major_locator(locator)
+        self._cbar.ax.yaxis.set_major_formatter(formatter)
+        self._cbar.ax.yaxis.set_minor_locator(mticker.NullLocator())
+        self._cbar.update_ticks()
+
     def _clear_upper_air_artists(self):
         if self._contour_sets:
             for cs in self._contour_sets:
