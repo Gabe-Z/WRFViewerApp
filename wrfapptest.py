@@ -691,39 +691,15 @@ class WRFLoader(QtCore.QObject):
                 data2d = np.hypot(u10, v10)
             elif v == 'T2F':
                 if 'T2' not in nc.variables:
-                    raise RuntimeError('Variable "T2" not found; cannot compute 2 m temperature')
+                    raise RuntimeError('Variable "T2" not found; cannot compute 2 m temperature.')
                 t2_var = nc.variables['T2']
                 dims = tuple(getattr(t2_var, 'dimensions', ()))
                 if 'Time' in dims:
                     t2k = np.array(t2_var[frame.time_index, :, :])
                 else:
-                    t2k = np.array(t2_var[:, :])
+                    t2k = np.array(t2_varp[:, :])
                 t2c = t2k - 273.15
                 data2d = (t2c * 9.0 / 5.0) + 32.0
-            elif v == 'TD2F':
-                missing = [name for name in ('Q2', 'PSFC') if name not in nc.variables]
-                if missing:
-                    raise RuntimeError(f'Missing required variables for dewpoint: {", ".join(missing)}')
-
-                q2_var = nc.variables['Q2']
-                psfc_var = nc.variables['PSFC']
-
-                def _slice(v):
-                    dims = tuple(getattr(v, 'dimensions', ()))
-                    if 'Time' in dims:
-                        return np.array(v[frame.time_index, :, :])
-                    return np.array(v[:, :])
-
-                q2 = _slice(q2_var)
-                psfc = _slice(psfc_var)  # Pa
-
-                # Convert to dewpoint using vapor pressure from mixing ratio.
-                # e = (q * p) / (0.622 + q)
-                e_pa = (q2 * psfc) / (0.622 + q2)
-                e_pa = np.clip(e_pa, 1e-6, None)
-                log_ratio = np.log(e_pa / 611.2)
-                td_c = (243.5 * log_ratio) / (17.67 - log_ratio)
-                data2d = (td_c * 9.0 / 5.0) + 32.0
             elif v == 'PTYPE':
                 data2d = self._precip_type_field(frame)
             elif v == 'REFL1KM':
@@ -878,13 +854,13 @@ class WRFViewer(QMainWindow):
         # --- Variable categories (accordion data) ---
         self.var_categories: dict[str, list[tuple[str, str]]] = {
             'Surface': [
-                ('Composite Reflectivity', 'MDBZ'),
-                ('Total Rain Accumulation', 'RAINNC'),
-                ('RAINC', 'RAINC'),
+                ('2 m Temperature (°F)', 'T2F'),
                 ('10 m AGL Wind', 'WSPD10'),
                 ('2 m Temperature (°F)', 'T2F'),
                 ('2 m AGL Dewpoint (°F)', 'TD2F'),
                 ('Precipitation Type', 'PTYPE'),
+                ('Total Rain Accumulation', 'RAINNC'),
+                ('Composite Reflectivity', 'MDBZ'),
             ],
             'Severe': [
                 ('MDBZ', 'MDBZ'),
@@ -1430,8 +1406,6 @@ class WRFViewer(QMainWindow):
             return 0.0, 40.0, '10-m wind speed (m s$^{-1}$)'
         if v == 'T2F':
             return -60.0, 120.0, '2-m temperature (°F)'
-        if v == 'TD2F':
-            return -60.0, 120.0, '2-m dewpoint (°F)'
         if v == 'REFL1KM':
             return 0.0, 70.0, 'Reflectivity @ 1km AGL (dBZ)'
         if v == 'PTYPE':
@@ -1454,8 +1428,6 @@ class WRFViewer(QMainWindow):
             return 'Precipitation Type'
         if v == 'T2F':
             return '2 m Temperature (°F)'
-        if v == 'TD2F':
-            return '2 m Dewpoint (°F)'
         return display_var
     
     def _precip_type_style(self) -> tuple[ListedColormap, BoundaryNorm, list[int], list[str]]:
@@ -1599,6 +1571,57 @@ class WRFViewer(QMainWindow):
                 )
                 self._value_labels.append(txt)
     
+    def _clear_value_labels(self) -> None:
+        if not self._value_labels:
+            return
+        for label in self._value_labels:
+            try:
+                label.remove()
+            except Exception:
+                pass
+        self._value_labels.clear()
+    
+    def _draw_value_labels(self, lat: np.ndarray, lon: np.ndarray, data: np.ndarray, var: str) -> None:
+        self._clear_value_labels()
+        if var.upper() != 'T2F':
+            return
+        
+        arr = np.asarray(data)
+        if arr.ndim < 2:
+            return
+        arr = np.squeeze(arr)
+        if arr.ndim != 2:
+            return
+        
+        lat_arr = np.asarray(lat)
+        lon_arr = np.asarray(lon)
+        if lat_arr.shape != arr.shape or lon_arr.shape != arr.shape:
+            ny = min(arr.shape[0], lat_arr.shape[0], lon_arr.shape[0])
+            nx = min(arr.shape[1], lat_arr.shape[1], lon_arr.shape[1])
+            arr = arr[:ny, :nx]
+            lat_arr = lat_arr[:ny, :nx]
+            lon_arr = lon_arr[:ny, :nx]
+        
+        stride = 25
+        start_y = stride if arr.shape[0] > 1 else 0
+        start_x = stride if arr.shape[1] > 1 else 0
+        for iy in range(start_y, arr.shape[0], stride):
+            for ix in range(start_x, arr.shape[1], stride):
+                val = arr[iy, ix]
+                if not np.isfinite(val):
+                    continue
+                txt = self.ax.text(
+                    lon_arr[iy, ix],
+                    lat_arr[iy, ix],
+                    f'{val:.0f}',
+                    transform=ccrs.PlateCarree(),
+                    fontsize=12,
+                    ha='center',
+                    va='center',
+                    color='black',
+                )
+                self._value_labels.append(txt)
+                
     def _reset_colorbar_ticks(self) -> None:
         if not self._cbar:
             return
