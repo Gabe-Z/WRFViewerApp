@@ -89,8 +89,8 @@ class SurfaceWindData:
     scalar: np.ndarray
     u: np.ndarray
     v: np.ndarray
-    
-    
+
+
 # Use nearly a full step for intensity shading inside each precipitation
 # category so the colorbar ticks (0.0, 0.01, 0.05, 0.25, 0.5 in/hr) land at the
 # expected quarter/half/three-quarter heights of each band (0.0 at the base,
@@ -736,27 +736,27 @@ class WRFLoader(QtCore.QObject):
                 missing = [name for name in required if name not in nc.variables]
                 if missing:
                     raise RuntimeError(f'Missing required variables for 2 m RH / 10 m wind: {", ".join(missing)}')
-
+                
                 def _slice(vname: str) -> np.ndarray:
                     var = nc.variables[vname]
                     dims = tuple(getattr(var, 'dimensions', ()))
                     if 'Time' in dims:
                         return np.array(var[frame.time_index, :, :])
                     return np.array(var[:, :])
-
+                
                 t2_k = _slice('T2')
                 q2 = _slice('Q2')
                 psfc = _slice('PSFC')
                 u10 = _slice('U10')
                 v10 = _slice('V10')
-
+                
                 # Convert T2 (K) and mixing ratio to relative humidity (percent).
                 e_pa = (q2 * psfc) / (0.622 + q2)
                 e_pa = np.clip(e_pa, 1e-6, None)
                 tc = t2_k - 273.15
                 es_pa = 611.2 * np.exp((17.67 * tc) / (tc + 243.5))
                 rh = np.clip((e_pa / es_pa) * 100.0, 0.0, 100.0)
-
+                
                 ms_to_kt = 1.9438444924406
                 data2d = SurfaceWindData(
                     scalar=rh.astype(float32),
@@ -917,9 +917,9 @@ class WRFViewer(QMainWindow):
         # --- Variable categories (accordion data) ---
         self.var_categories: dict[str, list[tuple[str, str]]] = {
             'Surface': [
-                ('2 m AGL Temperature (°F)', 'T2F'),
-                ('2 m AGL Dewpoint (°F)', 'TD2F'),
-                ('2 m AGL Relative Humidity (%) with 10 m AGL Wind (kt) (Barb)', 'RH2WIND10KT'),
+                ('2m Temperature (°F)', 'T2F'),
+                ('2m Dewpoint (°F)', 'TD2F'),
+                ('2m Relative Humidity (%) & 10m Wind (kt)', 'RH2WIND10KT'),
                 ('10 m AGL Wind', 'WSPD10'),
                 ('Precipitation Type', 'PTYPE'),
                 ('Total Rain Accumulation', 'RAINNC'),
@@ -1359,7 +1359,7 @@ class WRFViewer(QMainWindow):
             dx = (xmax - xmin) * 0.05
             self.ax.set_extent([xmin - dx, xmax + dx, ymin - dy, ymax + dy], crs=ccrs.PlateCarree())
             self._extent_set = True
-
+        
         if spec:
             if not isinstance(data_obj, UpperAirData):
                 data_obj = self.loader.get_upper_air_data(frame, var)
@@ -1694,14 +1694,14 @@ class WRFViewer(QMainWindow):
             except Exception:
                 pass
             self._barb_art = None
-
+    
     def _draw_surface_barbs(self, lat: np.ndarray, lon: np.ndarray, data: SurfaceWindData) -> None:
         self._clear_upper_air_artists()
-
+        
         stride = 12
         barb_length = 5.5
         barb_color = 'black'
-
+        
         u = np.asarray(data.u)
         v = np.asarray(data.v)
         u = np.squeeze(u)
@@ -1713,7 +1713,7 @@ class WRFViewer(QMainWindow):
             v = v[:ny, :nx]
             lat = lat[:ny, :nx]
             lon = lon[:ny, :nx]
-
+        
         start_y = stride if lat.shape[0] > 1 else 0
         start_x = stride if lon.shape[1] > 1 else 0
         sl = (slice(start_y, None, stride), slice(start_x, None, stride))
@@ -1787,9 +1787,7 @@ class WRFViewer(QMainWindow):
             v = v[:ny, :nx]
             lat = lat[:ny, :nx]
             lon = lon[:ny, :nx]
-        start_y = stride if lat.shape[0] > 1 else 0
-        start_x = stride if lon.shape[1] > 1 else 0
-        sl = (slice(start_y, None, stride), slice(start_x, None, stride))
+        sl = (slice(None, None, stride), slice(None, None, stride))
         barb_lon = lon[sl]
         barb_lat = lat[sl]
         barb_u = u[sl]
