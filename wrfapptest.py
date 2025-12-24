@@ -691,13 +691,13 @@ class WRFLoader(QtCore.QObject):
                 data2d = np.hypot(u10, v10)
             elif v == 'T2F':
                 if 'T2' not in nc.variables:
-                    raise RuntimeError('Variable "T2" not found; cannot compute 2 m temperature')
+                    raise RuntimeError('Variable "T2" not found; cannot compute 2 m temperature.')
                 t2_var = nc.variables['T2']
                 dims = tuple(getattr(t2_var, 'dimensions', ()))
                 if 'Time' in dims:
                     t2k = np.array(t2_var[frame.time_index, :, :])
                 else:
-                    t2k = np.array(t2_var[:, :])
+                    t2k = np.array(t2_varp[:, :])
                 t2c = t2k - 273.15
                 data2d = (t2c * 9.0 / 5.0) + 32.0
             elif v == 'PTYPE':
@@ -854,12 +854,11 @@ class WRFViewer(QMainWindow):
         # --- Variable categories (accordion data) ---
         self.var_categories: dict[str, list[tuple[str, str]]] = {
             'Surface': [
-                ('Composite Reflectivity', 'MDBZ'),
-                ('Total Rain Accumulation', 'RAINNC'),
-                ('RAINC', 'RAINC'),
-                ('10 m AGL Wind', 'WSPD10'),
                 ('2 m Temperature (°F)', 'T2F'),
+                ('10 m AGL Wind', 'WSPD10'),
                 ('Precipitation Type', 'PTYPE'),
+                ('Total Rain Accumulation', 'RAINNC'),
+                ('Composite Reflectivity', 'MDBZ'),
             ],
             'Severe': [
                 ('MDBZ', 'MDBZ'),
@@ -1394,7 +1393,7 @@ class WRFViewer(QMainWindow):
         self.ax.set_title(self._title_text(display_var, var), loc='center', fontsize=12, fontweight='bold')
         self._draw_value_labels(plot_lat, plot_lon, data, var)
         self.canvas.draw_idle()
-
+        
     def _default_range(self, var: str) -> tuple[T.Optional[float], T.Optional[float], str]:
         v = var.upper()
         if v in ('MDBZ', 'MAXDBZ'):
@@ -1518,7 +1517,7 @@ class WRFViewer(QMainWindow):
             
         if moved:
             ax.figure.canvas.draw_idle()
-
+    
     def _clear_value_labels(self) -> None:
         if not self._value_labels:
             return
@@ -1528,19 +1527,19 @@ class WRFViewer(QMainWindow):
             except Exception:
                 pass
         self._value_labels.clear()
-
+    
     def _draw_value_labels(self, lat: np.ndarray, lon: np.ndarray, data: np.ndarray, var: str) -> None:
         self._clear_value_labels()
         if var.upper() != 'T2F':
             return
-
+        
         arr = np.asarray(data)
         if arr.ndim < 2:
             return
         arr = np.squeeze(arr)
         if arr.ndim != 2:
             return
-
+        
         lat_arr = np.asarray(lat)
         lon_arr = np.asarray(lon)
         if lat_arr.shape != arr.shape or lon_arr.shape != arr.shape:
@@ -1549,8 +1548,8 @@ class WRFViewer(QMainWindow):
             arr = arr[:ny, :nx]
             lat_arr = lat_arr[:ny, :nx]
             lon_arr = lon_arr[:ny, :nx]
-
-        stride = 5
+        
+        stride = 25
         start_y = stride if arr.shape[0] > 1 else 0
         start_x = stride if arr.shape[1] > 1 else 0
         for iy in range(start_y, arr.shape[0], stride):
@@ -1563,13 +1562,13 @@ class WRFViewer(QMainWindow):
                     lat_arr[iy, ix],
                     f'{val:.0f}',
                     transform=ccrs.PlateCarree(),
-                    fontsize=6,
+                    fontsize=12,
                     ha='center',
                     va='center',
                     color='black',
                 )
                 self._value_labels.append(txt)
-    
+                
     def _reset_colorbar_ticks(self) -> None:
         if not self._cbar:
             return
