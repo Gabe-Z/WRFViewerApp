@@ -6,17 +6,17 @@ from numpy import float32
 from wrf import interplevel, rh
 
 # Thermodynamic constants
-RD = 287.05  # J/(kg*K)
-CP = 1004.0  # J/(kg*K)
-P0 = 100000.0  # Pa
+RD = 287.05 # J/(kg*K)
+CP = 1004.0 # J/(kg*K)
+P0 = 100000.0 # Pa
 
 PTYPE_INTENSITY_SPAN = 0.995
 PTYPE_MAX_RATE_INHR = 0.5
 
 
 def ptype_rate_offset(rate: np.ndarray | float) -> np.ndarray | float:
-    """Map precipitation rate (in/hr) to an intensity offset inside the band."""
-
+    '''Map precipitation rate (in/hr) to an intensity offset inside the band.'''
+    
     rate_arr = np.asarray(rate, dtype=float32)
     break_rates = np.array([0.0, 0.01, 0.05, 0.25, PTYPE_MAX_RATE_INHR], dtype=float32)
     break_positions = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=float32) * PTYPE_INTENSITY_SPAN
@@ -48,16 +48,16 @@ def destagger(arr: np.ndarray, axis: int) -> np.ndarray:
 
 
 def calc_pressure(nc: Dataset, time_index: int) -> np.ndarray:
-    """Mass-level pressure (Pa) from perturbation + base state."""
-
+    ''' Mass-level pressure (Pa) from perturbation + base-state.'''
+    
     p_pert = slice_time_var(nc.variables['P'], time_index)
     p_base = slice_time_var(nc.variables['PB'], time_index)
     return (p_pert + p_base).astype(float32)
 
 
 def calc_height(nc: Dataset, time_index: int) -> np.ndarray:
-    """Mass-level geometric height (m) via PH/PHB geopotential."""
-
+    ''' Mass-level geometric height (m) via PH/PHB geopotential.'''
+    
     ph = slice_time_var(nc.variables['PH'], time_index)
     phb = slice_time_var(nc.variables['PHB'], time_index)
     geo = ph + phb
@@ -71,8 +71,8 @@ def calc_height(nc: Dataset, time_index: int) -> np.ndarray:
 
 
 def calc_temperature(nc: Dataset, pressure: np.ndarray, time_index: int) -> np.ndarray:
-    """Absolute air temperature (K) from perturbation potential temperature."""
-
+    ''' Absolute air temperature (K) from perturbation potential temperature.'''
+    
     theta_pert = slice_time_var(nc.variables['T'], time_index)
     theta = theta_pert + 300.0
     with np.errstate(invalid='ignore'):
@@ -80,29 +80,29 @@ def calc_temperature(nc: Dataset, pressure: np.ndarray, time_index: int) -> np.n
     return temp_k.astype(float32)
 
 
-def calc_relative_humidity(temp_k: np.ndarray, pressure: np.ndarray, qv: np.ndarray) -> np.ndarray:
-    """Relative humidity (%) using mixing ratio (kg/kg), temperature (K), and pressure (Pa)."""
-
+def calc_relative_humidity(temp_k: np.ndarray, pressure: np.ndarray, qv: ndarray) -> np.ndarray:
+    ''' Relative humidity (%) using mixing ratio (kg/kg), temperature (K), and pressure (Pa).'''
+    
     # Convert mixing ratio (r) to specific humidity (q) so vapor pressure follows the
-    # standard thermodynamic relationship. This avoids ambiguity about wrf.rh input
+    # standard thermodynamic relationships. This avoids ambiguity about wrf.rh input
     # units (C vs K, hPa vs Pa) and keeps the calculation fully explicit.
     r = np.asarray(qv, dtype=float32)
     temp_k = np.asarray(temp_k, dtype=float32)
     pressure = np.asarray(pressure, dtype=float32)
-
+    
     with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
         # Specific humidity q = r / (1 + r)
         q = r / (1.0 + r)
-
+        
         # Saturation vapor pressure over liquid water (Pa) using Tetens formula.
         temp_c = temp_k - 273.15
         es = 611.2 * np.exp(17.67 * temp_c / (temp_c + 243.5), dtype=float32)
-
+        
         # Saturation mixing ratio (kg/kg) and RH.
         epsilon = 0.622
         rs = epsilon * es / np.clip(pressure - es, 1e-6, None)
         rh_pct = 100.0 * (r / rs)
-
+        
     return np.clip(rh_pct, 0.0, 100.0, out=np.empty_like(rh_pct, dtype=float32))
 
 
@@ -114,7 +114,7 @@ def ensure_pressure_orientation(
         return orient
     surf_med = np.nanmedian(pressure[0, :, :])
     top_med = np.nanmedian(pressure[-1, :, :])
-
+    
     if np.isfinite(surf_med) and np.isfinite(top_med) and surf_med != top_med:
         orient = 'ascending' if surf_med <= top_med else 'descending'
     else:
@@ -123,7 +123,7 @@ def ensure_pressure_orientation(
         orient = 'descending'
         if sample.size >= 2:
             orient = 'ascending' if sample[0] <= sample[-1] else 'descending'
-
+            
     orientation_cache[frame_path] = orient
     return orient
 
@@ -159,18 +159,18 @@ def interp_to_pressure(
         # Normalize to surface-first descending order for interpolation.
         pressure = pressure[::-1, :, :]
         field = field[::-1, :, :]
-
+        
     if field.shape != pressure.shape:
         min_dims = tuple(min(fs, ps) for fs, ps in zip(field.shape, pressure.shape))
         field = field[tuple(slice(0, m) for m in min_dims)]
         pressure = pressure[tuple(slice(0, m) for m in min_dims)]
-
+    
     pressure_hpa = np.ascontiguousarray(pressure, dtype=float32) / 100.0
     field = np.ascontiguousarray(field, dtype=float32)
-
+    
     with np.errstate(invalid='ignore'):
         interp = interplevel(field, pressure_hpa, level_hpa, meta=False)
-
+    
     # Mask columns that never reach the requested pressure level (terrain above level
     # or truncated model tops). Use finite-aware extrema to avoid propagating NaNs.
     level_pa = level_hpa * 100.0
@@ -178,13 +178,13 @@ def interp_to_pressure(
     col_min = np.nanmin(pressure, axis=0)
     valid = (col_max >= level_pa) & (col_min <= level_pa)
     interp = np.where(valid, interp, np.nan)
-
+    
     return np.asarray(interp, dtype=float32)
-
-
+    
+    
 def dbz_to_rate_inhr(dbz: np.ndarray) -> np.ndarray:
-    """Approximate precipitation rate (in/hr) from reflectivity (dBZ)."""
-
+    '''Approximate precipitation rate (in/hr) from reflectivity (dBZ).'''
+    
     dbz = np.asarray(dbz, dtype=float32)
     with np.errstate(over='ignore'):
         z_lin = np.power(10.0, dbz * 0.1)

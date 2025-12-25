@@ -47,8 +47,6 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout
 from wrf import to_np # getvar, latlon_coords, ALL_TIMES, interplevel
 
 from calc import (
-    PTYPE_INTENSITY_SPAN,
-    PTYPE_MAX_RATE_INHR,
     calc_height,
     calc_pressure,
     calc_relative_humidity,
@@ -57,6 +55,8 @@ from calc import (
     destagger,
     ensure_pressure_orientation,
     interp_to_pressure,
+    PTYPE_INTENSITY_SPAN,
+    PTYPE_MAX_RATE_INHR,
     ptype_rate_offset,
     slice_time_var,
 )
@@ -133,7 +133,7 @@ UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
         vmin=0.0,
         vmax=100.0,
         contour_field='height',
-        contour_levels=np.arange(2800.0, 3400.1, 60.0),
+        contour_levels=np.arange(2300.0, 3500.1, 60.0),
         contour_color='black',
         contour_width=0.8,
         barb_stride=16,
@@ -150,7 +150,7 @@ UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
         vmin=-51.1,
         vmax=48.9,
         contour_field='height',
-        contour_levels=np.arange(1300.0, 1700.1, 30.0),
+        contour_levels=np.arange(1000.0, 1700.1, 30.0),
         contour_color='black',
         contour_width=1.0,
         barb_stride=16,
@@ -248,7 +248,7 @@ class WRFLoader(QtCore.QObject):
         if cached is not None:
             self._upper_base_cache.move_to_end(key)
             return cached
-
+            
         with Dataset(frame.path) as nc:
             pressure = calc_pressure(nc, frame.time_index).astype(float32)
             height = calc_height(nc, frame.time_index).astype(float32)
