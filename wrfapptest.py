@@ -46,6 +46,21 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QSplitter, QToolBox, QVBoxLayout, QWidget)
 from wrf import to_np # getvar, latlon_coords, ALL_TIMES, interplevel
 
+from calc import (
+    PTYPE_INTENSITY_SPAN,
+    PTYPE_MAX_RATE_INHR,
+    calc_height,
+    calc_pressure,
+    calc_relative_humidity,
+    calc_temperature,
+    dbz_to_rate_inhr,
+    destagger,
+    ensure_pressure_orientation,
+    interp_to_pressure,
+    ptype_rate_offset,
+    slice_time_var,
+)
+
 
 # ------------------------
 # Data Structure
@@ -89,32 +104,6 @@ class SurfaceWindData:
     scalar: np.ndarray
     u: np.ndarray
     v: np.ndarray
-
-
-# Use nearly a full step for intensity shading inside each precipitation
-# category so the colorbar ticks (0.0, 0.01, 0.05, 0.25, 0.5 in/hr) land at the
-# expected quarter/half/three-quarter heights of each band (0.0 at the base,
-# 0.5 near the top). Leave a tiny margin below 1.0 to avoid crossing the next
-# category boundary when values are clipped.
-PTYPE_INTENSITY_SPAN = 0.995
-PTYPE_MAX_RATE_INHR = 0.5
-
-
-def _ptype_rate_offset(rate: np.ndarray | float) -> np.ndarray | float:
-    ''' Map precipitation rate (in/hr) to an intensity offset inside the band.
-    
-    Rates are clamped to [0.0, 0.5] in/hr and then interpolated so 0.01, 0.05, 0.25,
-    and 0.5 in/hr land at 1/4, 1/2, 3/4, and full intensity respectively.
-    '''
-    
-    rate_arr = np.asarray(rate, dtype=float32)
-    break_rates = np.array([0.0, 0.01, 0.05, 0.25, PTYPE_MAX_RATE_INHR], dtype=float32)
-    break_positions = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=float32) * PTYPE_INTENSITY_SPAN
-    clamped = np.clip(rate_arr, break_rates[0], break_rates[-1])
-    offset = np.interp(clamped, break_rates, break_positions)
-    if np.isscalar(rate):
-        return float(offset)
-    return offset.astype(float32)
 
 
 UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
@@ -253,68 +242,24 @@ class WRFLoader(QtCore.QObject):
         self._geo_cache[fp] = (lat, lon)
         return lat, lon
     
-    # --- Utilities for raw access ---
-    def _slice_time_var(self, var_obj, time_index: int) -> np.ndarray:
-        dims = tuple(getattr(var_obj, 'dimensions', ()))
-        if 'Time' in dims:
-            axis = dims.index('Time')
-            slicer = [slice(None)] * var_obj.ndim
-            slicer[axis] = time_index
-            data = np.array(var_obj[tuple(slicer)])
-        else:
-            data = np.array(var_obj[:])
-        return data
-    
-    def _destagger(self, arr: np.ndarray, axis: int) -> np.ndarray:
-        slicer1 = [slice(None)] * arr.ndim
-        slicer2 = [slice(None)] * arr.ndim
-        slicer1[axis] = slice(0, -1)
-        slicer2[axis] = slice(1, None)
-        return 0.5 * (arr[tuple(slicer1)] + arr[tuple(slicer2)])
-    
-    def _calc_pressure(self, nc: Dataset, time_index: int) -> np.ndarray:
-        p = self._slice_time_var(nc.variables['P'], time_index)
-        pb = self._slice_time_var(nc.variables['PB'], time_index)
-        return (p + pb).astype(float32)
-    
-    def _calc_height(self, nc: Dataset, time_index: int) -> np.ndarray:
-        ph = self._slice_time_var(nc.variables['PH'], time_index)
-        phb = self._slice_time_var(nc.variables['PHB'], time_index)
-        z_full = (ph + phb) / 9.81
-        return 0.5 * (z_full[:-1, :, :] + z_full[1:, :, :])
-    
-    def _calc_temperature(self, nc: Dataset, pressure: np.ndarray, time_index: int) -> np.ndarray:
-        theta = self._slice_time_var(nc.variables['T'], time_index) + 300.0
-        temp_k = theta * (pressure / 100000.0) ** (287.0 / 1004.0)
-        return temp_k.astype(float32)
-    
-    def _calc_relative_humidity(self, temp_k: np.ndarray, pressure: np.ndarray, qv: np.ndarray) -> np.ndarray:
-        eps = 0.622
-        vap_press = (qv * pressure) / (eps + qv + 1e-12)
-        temp_c = temp_k - 273.15
-        es = 611.2 * np.exp((17.67 * temp_c) / (temp_c + 243.5))
-        es = np.maximum(es, 1.0)
-        rh = (vap_press / es) * 100.0
-        return np.clip(rh, 0.0, 100.0).astype(float32)
-    
     def _get_upper_base_fields(self, frame: WRFFrame) -> dict[str, np.ndarray]:
         key = (frame.path, frame.time_index)
         cached = self._upper_base_cache.get(key)
         if cached is not None:
             self._upper_base_cache.move_to_end(key)
             return cached
-            
+
         with Dataset(frame.path) as nc:
-            pressure = self._calc_pressure(nc, frame.time_index).astype(float32)
-            height = self._calc_height(nc, frame.time_index).astype(float32)
-            u_stag = self._slice_time_var(nc.variables['U'], frame.time_index)
-            v_stag = self._slice_time_var(nc.variables['V'], frame.time_index)
-            u_mass = self._destagger(u_stag, axis=-1).astype(float32)
-            v_mass = self._destagger(v_stag, axis=-2).astype(float32)
-            temp_k = self._calc_temperature(nc, pressure, frame.time_index)
+            pressure = calc_pressure(nc, frame.time_index).astype(float32)
+            height = calc_height(nc, frame.time_index).astype(float32)
+            u_stag = slice_time_var(nc.variables['U'], frame.time_index)
+            v_stag = slice_time_var(nc.variables['V'], frame.time_index)
+            u_mass = destagger(u_stag, axis=-1).astype(float32)
+            v_mass = destagger(v_stag, axis=-2).astype(float32)
+            temp_k = calc_temperature(nc, pressure, frame.time_index)
             temp_c = (temp_k - 273.15).astype(float32)
-            qv = self._slice_time_var(nc.variables['QVAPOR'], frame.time_index)
-            rh = self._calc_relative_humidity(temp_k, pressure, qv).astype(float32)
+            qv = slice_time_var(nc.variables['QVAPOR'], frame.time_index)
+            rh = calc_relative_humidity(temp_k, pressure, qv).astype(float32)
             wspd = np.hypot(u_mass, v_mass).astype(float32)
         
         # Some WRF outputs carry different vertical counts across staggered fields
@@ -362,116 +307,6 @@ class WRFLoader(QtCore.QObject):
             self._upper_base_cache.popitem(last=False)
         return fields
     
-    def _ensure_pressure_orientation(self, frame_path: str, pressure: np.ndarray) -> str:
-        orient = self._pressure_orientation.get(frame_path)
-        if orient:
-            return orient
-        sample = pressure[:, pressure.shape[1] // 2, pressure.shape[2]  // 2]
-        orient = 'ascending' if sample[0] <= sample[-1] else 'descending'
-        self._pressure_orientation[frame_path] = orient
-        return orient
-    
-    @staticmethod
-    def _interp_column(target_pa: float, p_col: np.ndarray, f_col: np.ndarray) -> float:
-        valid = np.isfinite(p_col) & np.isfinite(f_col)
-        if valid.sum() < 2:
-            return np.nan
-        p_valid = p_col[valid]
-        f_valid = f_col[valid]
-        if p_valid[0] > p_valid[-1]:
-            order = np.argsort(p_valid)
-            p_valid = p_valid[order]
-            f_valid = f_valid[order]
-        if target_pa < p_valid[0]:
-            if np.isclose(target_pa, p_valid[0]):
-                return float(f_valid[0])
-            return np.nan
-        if target_pa > p_valid[-1]:
-            return np.nan
-        return float(np.interp(target_pa, p_valid, f_valid, left=np.nan, right=np.nan))
-    
-    def _interp_to_pressure(self, field: np.ndarray, pressure: np.ndarray, level_hpa: float, frame_path: str) -> np.ndarray:
-        target_pa = level_hpa * 100.0
-        orient = self._ensure_pressure_orientation(frame_path, pressure)
-        if orient == 'descending':
-            pressure = pressure[::-1, :, :]
-            field = field[::-1, :, :]
-        if field.shape != pressure.shape:
-            min_dims = tuple(min(fs, ps) for fs, ps in zip(field.shape, pressure.shape))
-            field = field[tuple(slice(0, m) for m in min_dims)]
-            pressure = pressure[tuple(slice(0, m) for m in min_dims)]
-        
-        pressure = np.ascontiguousarray(pressure, dtype=float32)
-        field = np.ascontiguousarray(field, dtype=float32)
-        nz, ny, nx = pressure.shape
-        cols = np.moveaxis(pressure, 0, -1).reshape(-1, nz)
-        vals = np.moveaxis(field, 0, -1).reshape(-1, nz)
-        
-        finite_mask = np.all(np.isfinite(cols), axis=1) & np.all(np.isfinite(vals), axis=1)
-        monotonic_mask = np.all(np.diff(cols, axis=1) >= -1e13, axis=1)
-        valid_cols = finite_mask & monotonic_mask
-        
-        out_flat = np.full(cols.shape[0], np.nan, dtype=float32)
-        if np.any(valid_cols):
-            p_valid = cols[valid_cols]
-            f_valid = vals[valid_cols]
-            upper_mask = p_valid >= target_pa
-            has_upper = upper_mask.any(axis=1)
-            idx_upper = np.argmax(upper_mask, axis=1)
-            
-            valid_results = np.full(p_valid.shape[0], np.nan, dtype=float32)
-            
-            # Exact matches at the first level.
-            exact_first = has_upper & (idx_upper == 0) & np.isclose(p_valid[:, 0], target_pa)
-            if np.any(exact_first):
-                valid_results[exact_first] = f_valid[exact_first, 0].astype(float32)
-            
-            usable = has_upper & (idx_upper > 0)
-            if np.any(usable):
-                sel_rows = np.where(usable)[0]
-                upper_idx = idx_upper[usable]
-                lower_idx = upper_idx - 1
-                p1 = p_valid[sel_rows, lower_idx]
-                p2 = p_valid[sel_rows, upper_idx]
-                f1 = f_valid[sel_rows, lower_idx]
-                f2 = f_valid[sel_rows, upper_idx]
-                denom = p2 - p1
-                interp_vals = np.empty_like(p1, dtype=float32)
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    frac = (target_pa - p1) / denom
-                    interp_vals = f1 + frac * (f2 - f1)
-                zero_denom = np.abs(denom) < 1e-6
-                if np.any(zero_denom):
-                    interp_vals = interp_vals.astype(float32)
-                    interp_vals[zero_denom] = f1[zero_denom].astype(float32)
-                valid_results[sel_rows] = interp_vals.astype(float32)
-            
-            out_flat[valid_cols] = valid_results
-        
-        invalid_cols = ~valid_cols
-        if np.any(invalid_cols):
-            idxs = np.where(invalid_cols)[0]
-            for i, idx in enumerate(idxs):
-                out_flat[idx] = float32(
-                    self._interp_column(target_pa, cols[idxs[i]], vals[idxs[i]])
-                )
-        
-        return out_flat.reshape(ny, nx)
-    
-    def _dbz_to_rate_inhr(self, dbz: np.ndarray) -> np.ndarray:
-        '''Approximate precipitation rate (in/hr) from reflectivity (dBZ).
-        
-        Uses a Marshall-Palmer Z-R relationship (Z = 200 R^1.6), converts to
-        mm/hr, then inches/hr. Negative/invalid dBZ values are clipped to keep
-        rates non-negative.
-        '''
-        dbz = np.asarray(dbz, dtype=float32)
-        with np.errstate(over='ignore'):
-            z_lin = np.power(10.0, dbz * 0.1)
-        z_lin = np.clip(z_lin, 0.0, None)
-        rain_rate_mmhr = np.power(z_lin / 200.0, 1.0 / 1.6, dtype=float32)
-        return rain_rate_mmhr / 25.4
-    
     def _precip_type_field(self, frame: WRFFrame) -> np.ndarray:
         key = (frame.path, 'PTYPE', frame.time_index)
         cached = self._cache.get(key)
@@ -487,7 +322,7 @@ class WRFLoader(QtCore.QObject):
             f'PTYPE base shapes: pressure={pressure.shape}, temp={temp_c.shape}, height={height.shape}'
         )
         
-        orient = self._ensure_pressure_orientation(frame.path, pressure)
+        orient = ensure_pressure_orientation(frame.path, pressure, self._pressure_orientation)
         surface_first = orient == 'descending'
         self._log_debug(f'PTYPE orientation: {orient} (surface_first={surface_first})')
         if not surface_first:
@@ -587,7 +422,7 @@ class WRFLoader(QtCore.QObject):
                 mdbz = np.ascontiguousarray(mdbz[:ny, :nx], dtype=float32)
                 ptype = ptype[:ny, :nx]
             precip_mask = np.isfinite(mdbz) & (mdbz > 0.0)
-            rate_inhr = self._dbz_to_rate_inhr(mdbz)
+            rate_inhr = dbz_to_rate_inhr(mdbz)
             rate_inhr = np.clip(rate_inhr, 0.0, PTYPE_MAX_RATE_INHR)
             intensity = (rate_inhr / PTYPE_MAX_RATE_INHR).astype(float32) * PTYPE_INTENSITY_SPAN
             ptype = np.where(precip_mask, ptype.astype(float32) + intensity, np.nan)
@@ -616,17 +451,17 @@ class WRFLoader(QtCore.QObject):
         scalar3d = base_fields.get(spec.shading_field)
         if scalar3d is None:
             raise RuntimeError(f'Missing shading field "{spec.shading_field}" for {var}.')
-        scalar2d = self._interp_to_pressure(scalar3d, pressure, spec.level_hpa, frame.path)
+        scalar2d = interp_to_pressure(scalar3d, pressure, spec.level_hpa, frame.path, self._pressure_orientation)
         
         contour2d = None
         if spec.contour_field:
             contour3d = base_fields.get(spec.contour_field)
             if contour3d is None:
                 raise RuntimeError(f'Missing contour field "{spec.contour_field}" for {var}.')
-            contour2d = self._interp_to_pressure(contour3d, pressure, spec.level_hpa, frame.path)
+            contour2d = interp_to_pressure(contour3d, pressure, spec.level_hpa, frame.path, self._pressure_orientation)
         
-        u2d = self._interp_to_pressure(base_fields['u'], pressure, spec.level_hpa, frame.path)
-        v2d = self._interp_to_pressure(base_fields['v'], pressure, spec.level_hpa, frame.path)
+        u2d = interp_to_pressure(base_fields['u'], pressure, spec.level_hpa, frame.path, self._pressure_orientation)
+        v2d = interp_to_pressure(base_fields['v'], pressure, spec.level_hpa, frame.path, self._pressure_orientation)
         
         data = UpperAirData(
             scalar=scalar2d.astype(float32),
@@ -1539,7 +1374,7 @@ class WRFViewer(QMainWindow):
         rate_ticks = [0.0, 0.01, 0.05, 0.25, 0.5]
         
         def _offset(rate: float) -> float:
-            return float(_ptype_rate_offset(rate))
+            return float(ptype_rate_offset(rate))
         
         tick_values: list[float] = []
         tick_labels: list[str] = []
@@ -1650,7 +1485,7 @@ class WRFViewer(QMainWindow):
         if not self._cbar:
             return
         locator = mticker.AutoLocator()
-        formatter = mticker.ScalarFormatter()
+        formatter = mticker.ScalarFormatter(useOffset=False)
         formatter.set_powerlimits((-6, 6))
         self._cbar.ax.yaxis.set_major_locator(locator)
         self._cbar.ax.yaxis.set_major_formatter(formatter)
