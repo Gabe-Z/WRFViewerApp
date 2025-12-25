@@ -318,13 +318,11 @@ class WRFLoader(QtCore.QObject):
         temp_c = base_fields['temperature']
         height = base_fields['height']
         
-        self._log_debug(
-            f'PTYPE base shapes: pressure={pressure.shape}, temp={temp_c.shape}, height={height.shape}'
-        )
+        #self._log_debug(f'PTYPE base shapes: pressure={pressure.shape}, temp={temp_c.shape}, height={height.shape}')
         
         orient = ensure_pressure_orientation(frame.path, pressure, self._pressure_orientation)
         surface_first = orient == 'descending'
-        self._log_debug(f'PTYPE orientation: {orient} (surface_first={surface_first})')
+        #self._log_debug(f'PTYPE orientation: {orient} (surface_first={surface_first})')
         if not surface_first:
             pressure = pressure[::-1, :, :]
             temp_c = temp_c[::-1, :, :]
@@ -345,9 +343,7 @@ class WRFLoader(QtCore.QObject):
         height = np.ascontiguousarray(height[slicer], dtype=float32)
         pressure = np.ascontiguousarray(pressure[slicer], dtype=float32)
         
-        self._log_debug(
-            f'PTYPE aligned shapes: pressure={pressure.shape}, temp={temp_c.shape}, height={height.shape}, nz={nz}, ny={ny}, nx={nx}'
-        )
+        #self._log_debug(f'PTYPE aligned shapes: pressure={pressure.shape}, temp={temp_c.shape}, height={height.shape}, nz={nz}, ny={ny}, nx={nx}')
         
         layer_thickness = np.diff(height, axis=0, append=height[::-1, :, :])
         layer_thickness = np.clip(layer_thickness, 0.0, None)
@@ -359,18 +355,14 @@ class WRFLoader(QtCore.QObject):
             layer_thickness = layer_thickness[:nz_energy, :ny_energy, :nx_energy]
             temp_c = temp_c[:nz_energy, :ny_energy, :nx_energy]
             pressure = pressure[:nz_energy, :ny_energy, :nx_energy]
-            self._log_debug(
-                f'PTYPE energy align: layer_thickness shape={layer_thickness.shape}, temp shape={temp_c.shape}, pressure shape={pressure.shape}'
-            )
+            #self._log_debug(f'PTYPE energy align: layer_thickness shape={layer_thickness.shape}, temp shape={temp_c.shape}, pressure shape={pressure.shape}')
         
         warm_energy = np.sum(np.clip(temp_c, 0.0, None) * layer_thickness, axis=0)
         cold_energy = np.sum(np.clip(-temp_c, 0.0, None) * layer_thickness, axis=0)
         surface_temp = temp_c[0, :, :]
         max_temp = temp_c.max(axis=0)
         
-        self._log_debug(
-            f'PTYPE energies: warm_energy shape={warm_energy.shape}, cold_energy shape={cold_energy.shape}, surface_temp shape={surface_temp.shape}, max_temp shape={max_temp.shape}'
-        )
+        #self._log_debug(f'PTYPE energies: warm_energy shape={warm_energy.shape}, cold_energy shape={cold_energy.shape}, surface_temp shape={surface_temp.shape}, max_temp shape={max_temp.shape}')
         
         ptype = np.zeros_like(surface_temp, dtype=np.int8) # rain default
         
@@ -1232,9 +1224,7 @@ class WRFViewer(QMainWindow):
         tick_labels: T.Optional[list[str]] = None
         if var.upper() == 'PTYPE':
             cmap_to_use, norm, tick_values, tick_labels = self._precip_type_style()
-            self.loader._log_debug(
-                f'PTYPE plot alignment: data shape={data.shape}, lat shape={plot_lat.shape}, lon shape={plot_lon.shape}, ticks={tick_values}'
-            )
+            #self.loader._log_debug(f'PTYPE plot alignment: data shape={data.shape}, lat shape={plot_lat.shape}, lon shape={plot_lon.shape}, ticks={tick_values}')
         
         # Create once /then resure for speed
         if self._img_art is None or self._img_shape != data.shape:
