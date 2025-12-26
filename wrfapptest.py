@@ -110,7 +110,7 @@ class SurfaceWindData:
 UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
     'HGT500': UpperAirSpec(
         canonical='HGT500',
-        display_name='500 mb Hgt/Wind',
+        display_name='500 mb Height, Wind',
         level_hpa=500.0,
         shading_field='height',
         colorbar_label='500 hPa Geopotential Height (m)',
@@ -127,7 +127,7 @@ UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
     ),
     'RH700': UpperAirSpec(
         canonical='RH700',
-        display_name='700 mb RH/Wind',
+        display_name='700 mb Relative Humidity, Wind',
         level_hpa=700.0,
         shading_field='rh',
         colorbar_label='700 hPa Relative Humidity (%)',
@@ -144,7 +144,7 @@ UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
     ),
     'TEMP850': UpperAirSpec(
         canonical='TEMP850',
-        display_name='850 mb Temp/Wind',
+        display_name='850 mb Temperature, Height, Wind',
         level_hpa=850.0,
         shading_field='temperature',
         colorbar_label='850 hPa Temperature (°C)',
@@ -811,7 +811,7 @@ class WRFViewer(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle('WRF Viewer - PySide6')
-        #self.resize(1200, 800)
+        self.resize(1400, 900)
         
         self.loader = WRFLoader()
         self.upper_air_specs = UPPER_AIR_SPECS
@@ -834,36 +834,53 @@ class WRFViewer(QMainWindow):
         vbox = QVBoxLayout(central)
 
         # --- Variable categories (accordion data) ---
-        self.var_categories: dict[str, list[tuple[str, str]]] = {
-            'Surface': [
-                ('2m Temperature (°F)', 'T2F'),
-                ('2m Dewpoint (°F)', 'TD2F'),
-                ('2m Relative Humidity (%) & 10m Wind (kt)', 'RH2WIND10KT'),
-                ('10 m AGL Wind', 'WSPD10'),
-                ('Precipitation Type', 'PTYPE'),
-                ('Total Rain Accumulation', 'RAINNC'),
-                ('Composite Reflectivity', 'MDBZ'),
+        self.var_categories: dict[str, list[dict[str, T.Any]]] = {
+            'Surface and Precipitation': [
+                {'label': 'Surface', 'canonical': None, 'is_divider': True},
+                {'label': '2m Temperature (°F)', 'canonical': 'T2F'},
+                {'label': '2m Dewpoint (°F)', 'canonical': 'TD2F'},
+                {'label': '2m Relative Humidity (%) & 10m Wind (kt)', 'canonical': 'RH2WIND10KT'},
+                {'label': '10 m AGL Wind', 'canonical': 'WSPD10'},
+                {'label': 'Precipitation Type', 'canonical': None, 'is_divider': True},
+                {'label': 'Precipitation Type, Rate', 'canonical': 'PTYPE'},
+                {'label': 'Quantitative Precipitation', 'canonical': None, 'is_divider': True},
+                {'label': 'Total Rain Accumulation', 'canonical': 'RAINNC'},
+                {'label': 'Radar Products', 'canonical': None, 'is_divider': True},
+                {'label': 'Composite Reflectivity', 'canonical': 'MDBZ'},
             ],
             'Winter Weather': [
-                ('Total Snowfall (10:1)', 'SNOW10'),
+                {'label': 'Total Snowfall (10:1)', 'canonical': 'SNOW10'},
             ],
             'Severe': [
-                ('MDBZ', 'MDBZ'),
-                ('REFL1KM', 'REFL1KM'),
+                {'label': 'MDBZ', 'canonical': 'MDBZ'},
+                {'label': 'REFL1KM', 'canonical': 'REFL1KM'},
             ],
-            'Upper Air': [
-                *[(spec.display_name, spec.canonical) for spec in UPPER_AIR_SPECS.values()],
-                ('REFL1KM', 'REFL1KM'),
+            'Upper Air: Height, Wind, Temperature': [
+                {'label': 'Height and Wind', 'canonical': None, 'is_divider': True},
+                {'label': UPPER_AIR_SPECS['HGT500'].display_name, 'canonical': 'HGT500'},
+                {'label': 'Temperature and Wind', 'canonical': None, 'is_divider': True},
+                {'label': UPPER_AIR_SPECS['TEMP850'].display_name, 'canonical': 'TEMP850'},
+                {'label': 'REFL1KM', 'canonical': 'REFL1KM'},
+            ],
+            'Upper Air: Moisture': [
+                {'label': 'Relative Humidity and Wind', 'canonical': None, 'is_divider': True},
+                {'label': UPPER_AIR_SPECS['RH700'].display_name, 'canonical': 'RH700'},
             ],
         }
         self._var_aliases: dict[str, str] = {
-            label.upper(): canonical.upper()
+            entry['label'].upper(): entry['canonical'].upper()
             for items in self.var_categories.values()
-            for label, canonical in items
+            for entry in items
+            if entry.get('canonical')
         }
 
         # ensure canonical names include themselves
-        for canonical in {c for items in self.var_categories.values() for _, c in items}:
+        for canonical in {
+            entry['canonical']
+            for items in self.var_categories.values()
+            for entry in items
+            if entry.get('canonical')
+        }:
             self._var_aliases.setdefault(canonical.upper(), canonical.upper())
 
         
@@ -880,12 +897,14 @@ class WRFViewer(QMainWindow):
         self.btn_open = QPushButton('Open wrfout...')
         self.btn_open.clicked.connect(self.on_open)
         controls.addWidget(self.btn_open)
-        
+
         seen_labels: set[str] = set()
         self._variable_labels: list[str] = []
         for items in self.var_categories.values():
-            for label, _ in items:
-                if label not in seen_labels:
+            for entry in items:
+                label = entry['label']
+                canonical = entry.get('canonical')
+                if canonical and label not in seen_labels:
                     seen_labels.add(label)
                     self._variable_labels.append(label)
 
@@ -972,14 +991,40 @@ class WRFViewer(QMainWindow):
             page_layout.setSpacing(4)
             list_widget = QListWidget()
             list_widget.setSelectionMode(QListWidget.SingleSelection)
-            for label, canonical in items:
+            list_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            divider_indices = [i for i, entry in enumerate(items) if entry.get('is_divider', False)]
+            first_divider_idx = divider_indices[0] if divider_indices else None
+            last_divider_idx = divider_indices[-1] if divider_indices else None
+            for idx, entry in enumerate(items):
+                label = entry['label']
+                canonical = entry.get('canonical')
+                is_divider = entry.get('is_divider', False)
+
+                if (
+                    is_divider
+                    and divider_indices
+                    and idx != first_divider_idx
+                ):
+                    spacer = QListWidgetItem('')
+                    spacer.setFlags(Qt.NoItemFlags)
+                    list_widget.addItem(spacer)
+
                 item = QListWidgetItem(label)
-                item.setData(Qt.UserRole, label)
-                item.setData(Qt.UserRole + 1, canonical)
+                if canonical:
+                    item.setData(Qt.UserRole, label)
+                    item.setData(Qt.UserRole + 1, canonical)
+                if is_divider:
+                    font = item.font()
+                    font.setBold(True)
+                    font.setPointSize(font.pointSize() + 1)
+                    item.setFont(font)
+                    item.setForeground(QtGui.QBrush(Qt.black))
+                    item.setFlags(Qt.ItemIsEnabled)
+                elif not canonical:
+                    item.setFlags(Qt.NoItemFlags)
                 list_widget.addItem(item)
             list_widget.itemClicked.connect(self._on_category_var_selected)
             page_layout.addWidget(list_widget)
-            page_layout.addStretch(1)
             self.var_toolbox.addItem(page, category)
             self._category_lists.append(list_widget)
 
@@ -999,9 +1044,10 @@ class WRFViewer(QMainWindow):
 
         self.main_splitter.addWidget(left_panel)
         self.main_splitter.addWidget(right_panel)
-        self.main_splitter.setStretchFactor(0, 0)
-        self.main_splitter.setStretchFactor(1, 1)
-        left_panel.setMinimumWidth(200)
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 3)
+        self.main_splitter.setSizes([320, 1080])
+        left_panel.setMinimumWidth(250)
 
         vbox.addWidget(self.main_splitter, stretch=1)
         
@@ -1061,6 +1107,9 @@ class WRFViewer(QMainWindow):
 
     def _on_category_var_selected(self, item: QListWidgetItem):
         if item is None:
+            return
+        canonical = item.data(Qt.UserRole + 1)
+        if not canonical:
             return
         label = item.data(Qt.UserRole) or item.text()
         if not label:
