@@ -48,14 +48,14 @@ def destagger(arr: np.ndarray, axis: int) -> np.ndarray:
 
 
 def calc_wind_gust_mph(nc: Dataset, time_index: int) -> np.ndarray:
-    '''10 m wind gust (mph) from WSPD10MAX (m/s).'''
-
+    ''' 10 m wind gust (mph) from WSPD10MAX (m/s). '''
+    
     if 'WSPD10MAX' not in nc.variables:
         raise RuntimeError('Variable "WSPD10MAX" not found; cannot compute wind gusts.')
-
+    
     gust_ms = slice_time_var(nc.variables['WSPD10MAX'], time_index)
     gust_ms = np.asarray(gust_ms, dtype=float32)
-
+    
     ms_to_mph = 2.2369362920544
     return (gust_ms * ms_to_mph).astype(float32)
 

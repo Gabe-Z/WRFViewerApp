@@ -1489,7 +1489,7 @@ class WRFViewer(QMainWindow):
         if not hasattr(self, '_ptype_cmap'):
             steps_per_type = 96
             type_gradients = [
-                ['#BDE9BF', '#6AA36C', '#116E28', '#F7F370', '#FF8B3C'], # Rain
+                ['#FFFFFF', '#BDE9BF', '#79B07B', '#498F53', '#498F53', '#52943C', '#BDD15D', '#FABF56', '#FF8B3C'], # Rain
                 ['#BDE1F3', '#5BA1C7', '#0E4C66', '#B1258C', '#EDD1E8'], # Snow
                 ['#F1CDDA', '#EB8880', '#ED4835', '#B43D37', '#7F3243'], # Mix / Freezing
                 ['#DEC1EC', '#B56CD0', '#9B2EBF', '#72297F', '#491C31'], # Sleet
@@ -1587,7 +1587,7 @@ class WRFViewer(QMainWindow):
     
     def _draw_value_labels(self, lat: np.ndarray, lon: np.ndarray, data: np.ndarray, var: str) -> None:
         self._clear_value_labels()
-        if var.upper() not in {'T2F', 'TD2F', 'GUST'}:
+        if var.upper() not in {'T2F', 'TD2F', 'GUST', 'WSPD10', 'SNOW10'}:
             return
         
         arr = np.asarray(data)
@@ -1606,7 +1606,7 @@ class WRFViewer(QMainWindow):
             lat_arr = lat_arr[:ny, :nx]
             lon_arr = lon_arr[:ny, :nx]
         
-        stride = 25
+        stride = 20
         start_y = stride if arr.shape[0] > 1 else 0
         start_x = stride if arr.shape[1] > 1 else 0
         for iy in range(start_y, arr.shape[0], stride):
