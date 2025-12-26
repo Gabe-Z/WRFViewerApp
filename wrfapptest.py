@@ -51,6 +51,7 @@ from calc import (
     calc_pressure,
     calc_relative_humidity,
     calc_temperature,
+    calc_wind_gust_mph,
     dbz_to_rate_inhr,
     destagger,
     ensure_pressure_orientation,
@@ -611,6 +612,8 @@ class WRFLoader(QtCore.QObject):
                 data2d = np.array(nc.variables['RAINC'][frame.time_index, :, :])
             elif v == 'SNOW10':
                 data2d = self._snowfall_10_to_1(frame)
+            elif v == 'GUST':
+                data2d = calc_wind_gust_mph(nc, frame.time_index)
             elif v == 'WSPD10':
                 u10 = np.array(nc.variables['U10'][frame.time_index, :, :])
                 v10 = np.array(nc.variables['V10'][frame.time_index, :, :])
@@ -837,6 +840,7 @@ class WRFViewer(QMainWindow):
         self.var_categories: dict[str, list[tuple[str, str]]] = {
             'Surface and Precipitation': [
                 {'label': 'Surface', 'canonical': None, 'is_divider': True},
+                {'label': '10 m AGL Wind Gusts', 'canonical': 'GUST'},
                 {'label': '2 m AGL Temperature', 'canonical': 'T2F'},
                 {'label': '2 m AGL Dewpoint', 'canonical': 'TD2F'},
                 {'label': '2 m AGL Relative Humidity, Wind Barbs', 'canonical': 'RH2WIND10KT'},
@@ -1439,6 +1443,8 @@ class WRFViewer(QMainWindow):
             return 0.0, 70.0, 'Reflectivity (dBZ)'
         if v in ('RAINNC', 'RAINC'):
             return 0.0, None, 'Accumulated Precip (mm)'
+        if v == 'GUST':
+            return 15.0, 75.0, '10-m wind gust (mph)'
         if v in ('WSPD10', 'WIND10'):
             return 0.0, 40.0, '10-m wind speed (m s$^{-1}$)'
         if v == 'RH2WIND10KT':
@@ -1581,7 +1587,7 @@ class WRFViewer(QMainWindow):
     
     def _draw_value_labels(self, lat: np.ndarray, lon: np.ndarray, data: np.ndarray, var: str) -> None:
         self._clear_value_labels()
-        if var.upper() not in {'T2F', 'TD2F'}:
+        if var.upper() not in {'T2F', 'TD2F', 'GUST'}:
             return
         
         arr = np.asarray(data)
