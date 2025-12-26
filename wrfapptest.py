@@ -58,6 +58,7 @@ from calc import (
     PTYPE_INTENSITY_SPAN,
     PTYPE_MAX_RATE_INHR,
     ptype_rate_offset,
+    snowfall_support,
     slice_time_var,
 )
 
@@ -176,6 +177,26 @@ class WRFLoader(QtCore.QObject):
         self._pressure_orientation: dict[str, str] = {}
         self._upper_base_cache: OrderedDict[tuple[str, int], dict[str, np.ndarray]] = OrderedDict()
         self._upper_base_cache_limit: int = 3
+
+    @staticmethod
+    def _align_xy(*arrays: np.ndarray) -> list[np.ndarray]:
+        finite_arrays = [arr for arr in arrays if arr is not None]
+        if not finite_arrays:
+            return list(arrays)
+
+        min_y = min(arr.shape[-2] for arr in finite_arrays)
+        min_x = min(arr.shape[-1] for arr in finite_arrays)
+
+        aligned: list[np.ndarray] = []
+        for arr in arrays:
+            if arr is None:
+                aligned.append(arr)
+                continue
+            slicer = [slice(None)] * arr.ndim
+            slicer[-2] = slice(0, min_y)
+            slicer[-1] = slice(0, min_x)
+            aligned.append(np.asarray(arr[tuple(slicer)]))
+        return aligned
     
     @staticmethod
     def _log_debug(msg: str) -> None:
@@ -241,7 +262,7 @@ class WRFLoader(QtCore.QObject):
                 lon = to_np(lons)
         self._geo_cache[fp] = (lat, lon)
         return lat, lon
-    
+
     def _get_upper_base_fields(self, frame: WRFFrame) -> dict[str, np.ndarray]:
         key = (frame.path, frame.time_index)
         cached = self._upper_base_cache.get(key)
@@ -306,7 +327,24 @@ class WRFLoader(QtCore.QObject):
         while len(self._upper_base_cache) > self._upper_base_cache_limit:
             self._upper_base_cache.popitem(last=False)
         return fields
-    
+
+    def _total_precip_inches(self, nc: Dataset, frame: WRFFrame) -> np.ndarray:
+        accum: T.Optional[np.ndarray] = None
+        for name in ('RAINNC', 'RAINC'):
+            if name not in nc.variables:
+                continue
+            var = nc.variables[name]
+            dims = tuple(getattr(var, 'dimensions', ()))
+            if 'Time' in dims:
+                arr = np.array(var[frame.time_index, :, :])
+            else:
+                arr = np.array(var[:, :])
+            accum = arr if accum is None else accum + arr
+
+        if accum is None:
+            raise RuntimeError('Need RAINNC or RAINC to compute snowfall accumulation')
+        return np.asarray(accum, dtype=float32) / 25.4
+
     def _precip_type_field(self, frame: WRFFrame) -> np.ndarray:
         key = (frame.path, 'PTYPE', frame.time_index)
         cached = self._cache.get(key)
@@ -423,6 +461,58 @@ class WRFLoader(QtCore.QObject):
         
         self._cache[key] = ptype.astype(float32)
         return self._cache[key]
+
+    def _snowfall_10_to_1(self, frame: WRFFrame) -> np.ndarray:
+        try:
+            target_idx = self.frames.index(frame)
+        except ValueError:
+            raise RuntimeError('Frame not found for snowfall calculation')
+
+        for idx in range(target_idx + 1):
+            fr = self.frames[idx]
+            snow_key = (fr.path, 'SNOW10', fr.time_index)
+            if snow_key in self._cache:
+                continue
+
+            with Dataset(fr.path) as nc:
+                precip_total = self._total_precip_inches(nc, fr)
+
+            precip_key = (fr.path, 'PRECIP_TOTAL_IN', fr.time_index)
+
+            if idx == 0:
+                prev_accum = np.zeros_like(precip_total, dtype=float32)
+                prev_precip = np.zeros_like(precip_total, dtype=float32)
+            else:
+                prev_frame = self.frames[idx - 1]
+                prev_accum = np.asarray(
+                    self._cache[(prev_frame.path, 'SNOW10', prev_frame.time_index)],
+                    dtype=float32,
+                )
+                prev_precip = np.asarray(
+                    self._cache[(prev_frame.path, 'PRECIP_TOTAL_IN', prev_frame.time_index)],
+                    dtype=float32,
+                )
+
+            base_fields = self._get_upper_base_fields(fr)
+            ptype = self._precip_type_field(fr)
+            support = snowfall_support(base_fields['temperature'], ptype)
+
+            precip_total, prev_accum, prev_precip, support = self._align_xy(
+                precip_total, prev_accum, prev_precip, support
+            )
+
+            reset_mask = precip_total < prev_precip
+            if np.any(reset_mask):
+                prev_precip = np.where(reset_mask, 0.0, prev_precip)
+
+            delta_liq = np.clip(precip_total - prev_precip, 0.0, None)
+            snowfall_increment = delta_liq * 10.0 * support
+            accum = np.clip(prev_accum + snowfall_increment, 0.0, 60.0)
+
+            self._cache[precip_key] = precip_total.astype(float32)
+            self._cache[snow_key] = accum.astype(float32)
+
+        return self._cache[(frame.path, 'SNOW10', frame.time_index)]
     
     def is_upper_air(self, var: str) -> bool:
         return var.upper() in UPPER_AIR_SPECS
@@ -519,6 +609,8 @@ class WRFLoader(QtCore.QObject):
                 data2d = np.array(nc.variables['RAINNC'][frame.time_index, :, :])
             elif v == 'RAINC':
                 data2d = np.array(nc.variables['RAINC'][frame.time_index, :, :])
+            elif v == 'SNOW10':
+                data2d = self._snowfall_10_to_1(frame)
             elif v == 'WSPD10':
                 u10 = np.array(nc.variables['U10'][frame.time_index, :, :])
                 v10 = np.array(nc.variables['V10'][frame.time_index, :, :])
@@ -751,6 +843,9 @@ class WRFViewer(QMainWindow):
                 ('Precipitation Type', 'PTYPE'),
                 ('Total Rain Accumulation', 'RAINNC'),
                 ('Composite Reflectivity', 'MDBZ'),
+            ],
+            'Winter Weather': [
+                ('Total Snowfall (10:1)', 'SNOW10'),
             ],
             'Severe': [
                 ('MDBZ', 'MDBZ'),
@@ -1304,6 +1399,8 @@ class WRFViewer(QMainWindow):
             return -40.0, 90, '2-m dewpoint (°F)'
         if v == 'REFL1KM':
             return 0.0, 70.0, 'Reflectivity @ 1km AGL (dBZ)'
+        if v == 'SNOW10':
+            return 0.0, 60.0, 'Total Snowfall (in)' 
         if v == 'PTYPE':
             # Keep the precipitation-type colorbar aligned to fixed 0-4 boundaries so
             # each category begins at an integer tick (0=rain, 1=snow, 2=mix, 3=sleet)
@@ -1322,6 +1419,8 @@ class WRFViewer(QMainWindow):
             return 'Reflectivity @ 1 km AGL (dBZ)'
         if v == 'PTYPE':
             return 'Precipitation Type'
+        if v == 'SNOW10':
+            return 'Total Snowfall (10:1)'
         if v == 'RH2WIND10KT':
             return '2 m Relative Humidity & 10 m Wind (kt)'
         if v == 'T2F':
