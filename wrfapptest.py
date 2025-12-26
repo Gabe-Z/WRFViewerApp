@@ -144,7 +144,7 @@ UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
     ),
     'TEMP850': UpperAirSpec(
         canonical='TEMP850',
-        display_name='850 mb Temperature, Height, Wind',
+        display_name='850 mb Temperature, Wind',
         level_hpa=850.0,
         shading_field='temperature',
         colorbar_label='850 hPa Temperature (°C)',
@@ -834,12 +834,12 @@ class WRFViewer(QMainWindow):
         vbox = QVBoxLayout(central)
 
         # --- Variable categories (accordion data) ---
-        self.var_categories: dict[str, list[dict[str, T.Any]]] = {
+        self.var_categories: dict[str, list[tuple[str, str]]] = {
             'Surface and Precipitation': [
                 {'label': 'Surface', 'canonical': None, 'is_divider': True},
-                {'label': '2m Temperature (°F)', 'canonical': 'T2F'},
-                {'label': '2m Dewpoint (°F)', 'canonical': 'TD2F'},
-                {'label': '2m Relative Humidity (%) & 10m Wind (kt)', 'canonical': 'RH2WIND10KT'},
+                {'label': '2 m AGL Temperature', 'canonical': 'T2F'},
+                {'label': '2 m AGL Dewpoint', 'canonical': 'TD2F'},
+                {'label': '2 m AGL Relative Humidity, Wind Barbs', 'canonical': 'RH2WIND10KT'},
                 {'label': '10 m AGL Wind', 'canonical': 'WSPD10'},
                 {'label': 'Precipitation Type', 'canonical': None, 'is_divider': True},
                 {'label': 'Precipitation Type, Rate', 'canonical': 'PTYPE'},
@@ -849,18 +849,19 @@ class WRFViewer(QMainWindow):
                 {'label': 'Composite Reflectivity', 'canonical': 'MDBZ'},
             ],
             'Winter Weather': [
+                {'label': 'Snowfall (10:1 Ratio)', 'canonical': None, 'is_divider': True},
                 {'label': 'Total Snowfall (10:1)', 'canonical': 'SNOW10'},
             ],
-            'Severe': [
-                {'label': 'MDBZ', 'canonical': 'MDBZ'},
-                {'label': 'REFL1KM', 'canonical': 'REFL1KM'},
+            'Severe Weather': [
+                {'label': 'Excplicit Convective Products', 'canonical': None, 'is_divider': True},
+                {'label': 'Composite Reflectivity', 'canonical': 'MDBZ'},
+                {'label': 'Reflectivity 1km', 'canonical': 'REFL1KM'},
             ],
             'Upper Air: Height, Wind, Temperature': [
                 {'label': 'Height and Wind', 'canonical': None, 'is_divider': True},
                 {'label': UPPER_AIR_SPECS['HGT500'].display_name, 'canonical': 'HGT500'},
                 {'label': 'Temperature and Wind', 'canonical': None, 'is_divider': True},
                 {'label': UPPER_AIR_SPECS['TEMP850'].display_name, 'canonical': 'TEMP850'},
-                {'label': 'REFL1KM', 'canonical': 'REFL1KM'},
             ],
             'Upper Air: Moisture': [
                 {'label': 'Relative Humidity and Wind', 'canonical': None, 'is_divider': True},
@@ -897,7 +898,7 @@ class WRFViewer(QMainWindow):
         self.btn_open = QPushButton('Open wrfout...')
         self.btn_open.clicked.connect(self.on_open)
         controls.addWidget(self.btn_open)
-
+        
         seen_labels: set[str] = set()
         self._variable_labels: list[str] = []
         for items in self.var_categories.values():
@@ -999,7 +1000,7 @@ class WRFViewer(QMainWindow):
                 label = entry['label']
                 canonical = entry.get('canonical')
                 is_divider = entry.get('is_divider', False)
-
+                
                 if (
                     is_divider
                     and divider_indices
@@ -1008,7 +1009,7 @@ class WRFViewer(QMainWindow):
                     spacer = QListWidgetItem('')
                     spacer.setFlags(Qt.NoItemFlags)
                     list_widget.addItem(spacer)
-
+                
                 item = QListWidgetItem(label)
                 if canonical:
                     item.setData(Qt.UserRole, label)
@@ -1046,7 +1047,7 @@ class WRFViewer(QMainWindow):
         self.main_splitter.addWidget(right_panel)
         self.main_splitter.setStretchFactor(0, 1)
         self.main_splitter.setStretchFactor(1, 3)
-        self.main_splitter.setSizes([320, 1080])
+        self.main_splitter.setSizes([250, 1080])
         left_panel.setMinimumWidth(250)
 
         vbox.addWidget(self.main_splitter, stretch=1)
