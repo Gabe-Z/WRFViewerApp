@@ -195,52 +195,52 @@ def dbz_to_rate_inhr(dbz: np.ndarray) -> np.ndarray:
 
 def snowfall_support(temp_c: np.ndarray, ptype_field: np.ndarray) -> np.ndarray:
     '''
-    Estimate how much falling precipitation contributes to snowfall accumulation.
-
+    Estimate how much falling precipitation contributes to snowfall accumlation.
+    
     Parameters
     ----------
     temp_c: np.ndarray
         3-D temperature profile (K or °C) on mass levels in Celsius.
     ptype_field: np.ndarray
-        2-D precipitation type field where the integer portion follows the
+        2-D precipitation type field where the integer portion follows the 
         categorical convention: 0=rain, 1=snow, 2=mix, 3=sleet.
-
+    
     Returns
     -------
     np.ndarray
-        Fraction [0-1] describing how much liquid precipitation accumulates as
+        Fraction [0-1] describing how much liquid precipitation accumlation as
         snow given the vertical thermal structure. Values account for a
-        near-surface melting window (32-36 °F) so accumulation smoothly ramps
-        down as temperatures approach melting.
+        near-surface melting window (32-36 °F) so accumlation smoothly ramps
+        down as temperature approach melting.
     '''
-
+        
     temps = np.asarray(temp_c, dtype=float32)
     ptype = np.asarray(ptype_field, dtype=float32)
-
+    
     # Align horizontal dimensions.
     surf_temp_f = (temps[0, :, :] * 9.0 / 5.0) + 32.0
     ny = min(surf_temp_f.shape[0], ptype.shape[0])
     nx = min(surf_temp_f.shape[1], ptype.shape[1])
     surf_temp_f = surf_temp_f[:ny, :nx]
     ptype = ptype[:ny, :nx]
-    temps = temps[:, :ny, :nx]
-
+    temps = temps[:ny, :nx]
+    
     # Warm nose aloft can still erode flakes; weight by coldest column signal.
     max_temp_c = np.nanmax(temps, axis=0)
     melt_penalty = np.clip((1.5 - max_temp_c) / 1.5, 0.0, 1.0)
-
-    # Surface temperature taper between 32-36 F.
-    surface_weight = np.clip((36.0 - surf_temp_f) / 4.0, 0.0, 1.0)
-
+    
+    # Surface temperature taper between 32-40 F.
+    surface_weight = np.clip((40.0 - surf_temp_f) / 4.0, 0.0, 1.0)
+    
     valid_ptype = np.isfinite(ptype)
     base_class = np.zeros_like(ptype, dtype=np.int8)
     base_class[valid_ptype] = np.floor(ptype[valid_ptype]).astype(np.int8)
-
+    
     type_factor = np.zeros_like(surface_weight, dtype=float32)
-    type_factor[base_class == 1] = 1.0  # snow
-    type_factor[base_class == 2] = 0.5  # mix/freezing rain
-    type_factor[base_class == 3] = 0.3  # sleet/ice pellets contribute a little depth
-
+    type_factor[base_class == 1] = 1.0 # Snow
+    type_factor[base_class == 2] = 0.5 # Mix/Freezing Rain
+    type_factor[base_class == 3] = 0.3 # Sleet/Ice pellets contribute a little depth
+    
     support = surface_weight * type_factor * melt_penalty
     support[~np.isfinite(ptype)] = 0.0
     return support.astype(float32)
