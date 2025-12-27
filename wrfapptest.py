@@ -401,12 +401,12 @@ class WRFLoader(QtCore.QObject):
         )
         if valid.sum() < 3:
             raise RuntimeError('Sounding column contains insufficient finite data to plot.')
-
+        
         return (
             pressure_hpa[valid],
             temp_c[valid],
             height_m[valid],
-            dewpoint_c[valid],
+            dewpoint_c[valid]
         )
     
     def _total_precip_inches(self, nc: Dataset, frame: WRFFrame) -> np.ndarray:
