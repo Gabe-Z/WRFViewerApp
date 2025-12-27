@@ -16,6 +16,7 @@ from calc import (
     sounding_skewed_isotherm,
     sounding_temperature_bounds,
     sounding_temperature_ticks,
+    virtual_temperature_profile,
 )
 
 
@@ -93,9 +94,17 @@ class SoundingWindow(QMainWindow):
         self._dewpoint_profile_c = dewpoint_profile_c
         
         self._draw_background()
-        
+
         if pressure_profile_hpa is not None and temperature_profile_c is not None:
             self._plot_temperature_profile(pressure_profile_hpa, temperature_profile_c)
+        if (
+            pressure_profile_hpa is not None
+            and temperature_profile_c is not None
+            and dewpoint_profile_c is not None
+        ):
+            self._plot_virtual_temperature_profile(
+                pressure_profile_hpa, temperature_profile_c, dewpoint_profile_c
+            )
         if pressure_profile_hpa is not None and dewpoint_profile_c is not None:
             self._plot_dewpoint_profile(pressure_profile_hpa, dewpoint_profile_c)
         if (
@@ -293,7 +302,32 @@ class SoundingWindow(QMainWindow):
             zorder=7,
         )
         self.figure.canvas.draw_idle()
-    
+
+    def _plot_virtual_temperature_profile(
+        self, pressure_hpa: np.ndarray, temperature_c: np.ndarray, dewpoint_c: np.ndarray
+    ) -> None:
+        vt_c = virtual_temperature_profile(pressure_hpa, temperature_c, dewpoint_c)
+
+        valid = np.isfinite(pressure_hpa) & np.isfinite(vt_c)
+        if valid.sum() < 2:
+            return
+
+        skewed_temps = sounding_skewed_isotherm(
+            vt_c[valid],
+            pressure_hpa[valid],
+            aspect_correction=getattr(self, '_aspect_correction', 1.0),
+        )
+
+        self.ax.plot(
+            skewed_temps,
+            pressure_hpa[valid],
+            color='red',
+            linestyle='--',
+            linewidth=2.0,
+            zorder=5,
+        )
+        self.figure.canvas.draw_idle()
+
     def _plot_dewpoint_profile(self, pressure_hpa: np.ndarray, dewpoint_c: np.ndarray) -> None:
         valid = np.isfinite(pressure_hpa) & np.isfinite(dewpoint_c)
         if valid.sum() < 2:
