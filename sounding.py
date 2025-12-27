@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QMainWindow, QVBoxLayout, QWidget
 
 from calc import (
+    parcel_trace_temperature_profile,
     sounding_isotherm_temperatures,
     sounding_pressure_bounds,
     sounding_pressure_levels,
@@ -92,11 +93,19 @@ class SoundingWindow(QMainWindow):
         self._dewpoint_profile_c = dewpoint_profile_c
         
         self._draw_background()
-        
+
         if pressure_profile_hpa is not None and temperature_profile_c is not None:
             self._plot_temperature_profile(pressure_profile_hpa, temperature_profile_c)
         if pressure_profile_hpa is not None and dewpoint_profile_c is not None:
             self._plot_dewpoint_profile(pressure_profile_hpa, dewpoint_profile_c)
+        if (
+            pressure_profile_hpa is not None
+            and temperature_profile_c is not None
+            and dewpoint_profile_c is not None
+        ):
+            self._plot_parcel_trace(
+                pressure_profile_hpa, temperature_profile_c, dewpoint_profile_c
+            )
     
     def _draw_background(self) -> None:
         temp_min, temp_max = sounding_temperature_bounds()
@@ -322,8 +331,35 @@ class SoundingWindow(QMainWindow):
                 'facecolor': 'black',
                 'edgecolor': 'none',
                 'alpha': 0.5,
-                'pad': 2.5,
+            'pad': 2.5,
             },
             zorder=7,
+        )
+        self.figure.canvas.draw_idle()
+
+    def _plot_parcel_trace(
+        self, pressure_hpa: np.ndarray, temperature_c: np.ndarray, dewpoint_c: np.ndarray
+    ) -> None:
+        parcel_temp_c = parcel_trace_temperature_profile(
+            pressure_hpa, temperature_c, dewpoint_c
+        )
+
+        valid = np.isfinite(pressure_hpa) & np.isfinite(parcel_temp_c)
+        if valid.sum() < 2:
+            return
+
+        skewed_temps = sounding_skewed_isotherm(
+            parcel_temp_c[valid],
+            pressure_hpa[valid],
+            aspect_correction=getattr(self, '_aspect_correction', 1.0),
+        )
+
+        self.ax.plot(
+            skewed_temps,
+            pressure_hpa[valid],
+            color='#a0a0a0',
+            linestyle='--',
+            linewidth=1.8,
+            zorder=5,
         )
         self.figure.canvas.draw_idle()
