@@ -37,11 +37,11 @@ def saturation_mixing_ratio(pressure_pa: float | np.ndarray, temp_k: float | np.
 
 
 def _mixing_ratio_from_dewpoint(pressure_hpa: float | np.ndarray, dewpoint_c: float | np.ndarray) -> np.ndarray:
-    ''' Mixing ratio (kg/kg) from pressure (hPa) and dewpoint (C). '''
-
+    ''' Mixing ratio (kg/kg) from pressure (hPa) and dewpoint (C).'''
+    
     pressure_pa = np.asarray(pressure_hpa, dtype=float32) * 100.0
     dew_c = np.asarray(dewpoint_c, dtype=float32)
-
+    
     es = _saturation_water_pressure_pa(dew_c)
     denom = np.clip(pressure_pa - es, 1e-6, None)
     return EPSILON * es / denom
@@ -49,10 +49,10 @@ def _mixing_ratio_from_dewpoint(pressure_hpa: float | np.ndarray, dewpoint_c: fl
 
 def virtual_temperature(temp_k: float | np.ndarray, mixing_ratio: float | np.ndarray) -> np.ndarray:
     ''' Virtual temperature (K) from temperature (K) and mixing ratio (kg/kg). '''
-
+    
     temp_k = np.asarray(temp_k, dtype=float32)
     r = np.asarray(mixing_ratio, dtype=float32)
-
+    
     with np.errstate(divide='ignore', invalid='ignore'):
         q = r / (1.0 + r)
         return temp_k * (1.0 + 0.61 * q)
@@ -62,19 +62,19 @@ def virtual_temperature_profile(
     pressure_hpa: np.ndarray, temperature_c: np.ndarray, dewpoint_c: np.ndarray
 ) -> np.ndarray:
     ''' Virtual temperature profile (C) using the ambient dewpoint-derived mixing ratio. '''
-
+    
     pres = np.asarray(pressure_hpa, dtype=float32)
     temp_c = np.asarray(temperature_c, dtype=float32)
     dew_c = np.asarray(dewpoint_c, dtype=float32)
-
+    
     valid = np.isfinite(pres) & np.isfinite(temp_c) & np.isfinite(dew_c)
     if valid.sum() < 2:
         return np.full_like(pres, np.nan, dtype=float32)
-
+    
     mixing_ratio = _mixing_ratio_from_dewpoint(pres[valid], dew_c[valid])
     temp_k = temp_c[valid] + 273.15
     vt_k = virtual_temperature(temp_k, mixing_ratio)
-
+    
     vt_c = np.full_like(pres, np.nan, dtype=float32)
     vt_c[valid] = vt_k - 273.15
     return vt_c
@@ -150,7 +150,7 @@ def parcel_trace_temperature_profile(
     tlcl_c, plcl_hpa = lcl_temperature_pressure(surf_p, surf_temp_c, surf_dew_c)
     surf_temp_k = surf_temp_c + 273.15
     theta = surf_temp_k * np.power(1000.0 / surf_p, RD / CP)
-
+    
     # Parcel total water content remains constant below the LCL. Above the LCL
     # the parcel follows a saturated mixing ratio determined by its temperature
     # and pressure.
@@ -163,7 +163,7 @@ def parcel_trace_temperature_profile(
     # Dry-adiabatic ascent from the surface to the LCL.
     if dry_mask.any():
         parcel_temps_k[dry_mask] = theta * np.power(pres_sorted[dry_mask] / 1000.0, RD / CP)
-
+    
     # Moist-adiabatic ascent above the LCL, stepping sequentially so curvature is preserved.
     if (~dry_mask).any():
         lcl_temp_k = theta * np.power(plcl_hpa / 1000.0, RD / CP)
@@ -175,23 +175,23 @@ def parcel_trace_temperature_profile(
             parcel_temps_k[idx] = temp_k
             prev_p = p_level
             prev_temp_k = temp_k
-
+    
     # Convert parcel temperature to virtual temperature using the appropriate
     # mixing ratio profile.
     mixing_ratio = np.full_like(parcel_temps_k, np.nan, dtype=float32)
-
+    
     if dry_mask.any():
         mixing_ratio[dry_mask] = surf_r
-
+    
     if (~dry_mask).any():
         for idx in np.where(~dry_mask)[0]:
             p_level = float(pres_sorted[idx])
             temp_k = float(parcel_temps_k[idx])
             mixing_ratio[idx] = saturation_mixing_ratio(p_level * 100.0, temp_k)
-
+    
     parcel_virtual_k = virtual_temperature(parcel_temps_k, mixing_ratio)
     parcel_virtual_c = parcel_virtual_k - 273.15
-
+    
     inv_order = np.argsort(order)
     return parcel_virtual_c[inv_order]
 
