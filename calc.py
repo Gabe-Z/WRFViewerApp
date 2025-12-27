@@ -18,20 +18,20 @@ PTYPE_INTENSITY_SPAN = 0.995
 PTYPE_MAX_RATE_INHR = 0.5
 
 
-def _saturation_vapor_pressure_pa(temp_c: float | np.ndarray) -> np.ndarray:
-    '''Saturation vapor pressure over liquid water (Pa) via Tetens formula.'''
-
+def _saturation_water_pressure_pa(temp_c: float | np.ndarray) -> np.ndarray:
+    ''' Saturation vapor pressure over liquid water (PA) via Tetens formula. '''
+    
     temp_c = np.asarray(temp_c, dtype=float32)
     return 611.2 * np.exp(17.67 * temp_c / (temp_c + 243.5), dtype=float32)
 
 
 def saturation_mixing_ratio(pressure_pa: float | np.ndarray, temp_k: float | np.ndarray) -> np.ndarray:
-    '''Saturation mixing ratio (kg/kg) given pressure (Pa) and temperature (K).'''
-
+    ''' Saturation mixing ratio (kg/kg) given pressure (Pa) and temperature (K). '''
+    
     pressure_pa = np.asarray(pressure_pa, dtype=float32)
     temp_k = np.asarray(temp_k, dtype=float32)
     temp_c = temp_k - 273.15
-    es = _saturation_vapor_pressure_pa(temp_c)
+    es = _saturation_water_pressure_pa(temp_c)
     denom = np.clip(pressure_pa - es, 1e-6, None)
     return EPSILON * es / denom
 
@@ -39,8 +39,8 @@ def saturation_mixing_ratio(pressure_pa: float | np.ndarray, temp_k: float | np.
 def lcl_temperature_pressure(
     pressure_hpa: float, temperature_c: float, dewpoint_c: float
 ) -> tuple[float, float]:
-    '''Return LCL temperature (°C) and pressure (hPa) via Bolton (1980).'''
-
+    ''' Return LCL temperature (C) and pressure (hPa) via Bolton (1980).'''
+    
     temp_k = temperature_c + 273.15
     dewpoint_k = dewpoint_c + 273.15
     with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
@@ -53,67 +53,67 @@ def lcl_temperature_pressure(
 def _moist_ascent_temperature(
     start_pressure_hpa: float, start_temp_k: float, target_pressure_hpa: float
 ) -> float:
-    '''Integrate moist-adiabatic ascent temperature between two pressure levels.'''
-
+    ''' Integrate moist-adiabatic ascent temperature between two pressure levels.'''
+    
     p = float(start_pressure_hpa)
     temp = float(start_temp_k)
     direction = -1.0 if target_pressure_hpa < start_pressure_hpa else 1.0
     step = 1.0 * direction
-
+    
     while (target_pressure_hpa - p) * direction > 1e-6:
         next_p = p + step
         if (next_p - target_pressure_hpa) * direction < 0.0:
             next_p = target_pressure_hpa
-
+        
         p_mid = 0.5 * (p + next_p)
         temp_mid = temp
         r_s = saturation_mixing_ratio(p_mid * 100.0, temp_mid)
-
+        
         gamma_m = G0 * (1.0 + (LV * r_s) / (RD * temp_mid))
         gamma_m /= CP + ((LV ** 2) * r_s * EPSILON) / (RD * (temp_mid ** 2))
-
+        
         dp_pa = (next_p - p) * 100.0
         dz = -RD * temp_mid * dp_pa / (p_mid * 100.0 * G0)
         temp += -gamma_m * dz
         p = next_p
-
+    
     return temp
 
 
 def parcel_trace_temperature_profile(
     pressure_hpa: np.ndarray, temperature_c: np.ndarray, dewpoint_c: np.ndarray
 ) -> np.ndarray:
-    '''Surface-based parcel temperature (°C) along the provided pressure levels.'''
-
+    ''' Surface-based parcel temperature (C) along the provided pressure levels. '''
+    
     pres = np.asarray(pressure_hpa, dtype=float32)
     temp_c = np.asarray(temperature_c, dtype=float32)
     dew_c = np.asarray(dewpoint_c, dtype=float32)
-
+    
     valid = np.isfinite(pres) & np.isfinite(temp_c) & np.isfinite(dew_c)
     if valid.sum() < 2:
         return np.full_like(pres, np.nan, dtype=float32)
-
+    
     order = np.argsort(pres)[::-1]
     pres_sorted = pres[order]
     temp_sorted = temp_c[order]
     dew_sorted = dew_c[order]
-
+    
     surface_idx = 0
     surf_p = float(pres_sorted[surface_idx])
     surf_temp_c = float(temp_sorted[surface_idx])
     surf_dew_c = float(dew_sorted[surface_idx])
-
+    
     tlcl_c, plcl_hpa = lcl_temperature_pressure(surf_p, surf_temp_c, surf_dew_c)
     surf_temp_k = surf_temp_c + 273.15
     theta = surf_temp_k * np.power(1000.0 / surf_p, RD / CP)
-
+    
     parcel_temps_k = np.full_like(pres_sorted, np.nan, dtype=float32)
     dry_mask = pres_sorted >= plcl_hpa
-
+    
     # Dry-adiabatic ascent from the surface to the LCL.
     if dry_mask.any():
         parcel_temps_k[dry_mask] = theta * np.power(pres_sorted[dry_mask] / 1000.0, RD / CP)
-
+    
     # Moist-adiabatic ascent above the LCL, stepping sequentially so curvature is preserved.
     if (~dry_mask).any():
         lcl_temp_k = theta * np.power(plcl_hpa / 1000.0, RD / CP)
@@ -125,7 +125,7 @@ def parcel_trace_temperature_profile(
             parcel_temps_k[idx] = temp_k
             prev_p = p_level
             prev_temp_k = temp_k
-
+    
     parcel_c = parcel_temps_k - 273.15
     inv_order = np.argsort(order)
     return parcel_c[inv_order]

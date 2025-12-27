@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 '''
+Created by Gabe Zago with the help of AI.
 WRF Viewer - Single file desktop app (PySide6 + Matplotlib + Cartopy)
 
 Features (MVP)
