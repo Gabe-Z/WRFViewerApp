@@ -80,6 +80,8 @@ from calc import (
     PTYPE_MAX_RATE_INHR,
     ptype_rate_offset,
     snowfall_support,
+    surface_based_cape,
+    surface_based_cape_from_profile,
     slice_time_var,
 )
 
@@ -825,9 +827,26 @@ class WRFLoader(QtCore.QObject):
                 w = np.clip(w, 0.0, 1.0)
                 
                 data2d = r0 + w * (r1 - r0)
-                
+
                 topcol = refl[-1, :, :]
                 data2d = np.where(has, data2d, topcol)
+            elif v == 'SBCAPE':
+                base_fields = self._get_upper_base_fields(frame)
+                orient = ensure_pressure_orientation(
+                    frame.path, base_fields['pressure'], self._pressure_orientation
+                )
+                pressure = base_fields['pressure']
+                temperature = base_fields['temperature']
+                rh = base_fields['rh']
+                height = base_fields['height']
+                if orient == 'ascending':
+                    pressure = pressure[::-1, :, :]
+                    temperature = temperature[::-1, :, :]
+                    rh = rh[::-1, :, :]
+                    height = height[::-1, :, :]
+
+                temp_k = temperature + 273.15
+                data2d = surface_based_cape(pressure, temp_k, rh, height)
             else:
                 if v not in nc.variables:
                     raise RuntimeError(f'Variable "{var}" not found')
@@ -929,6 +948,11 @@ class WRFViewer(QMainWindow):
                 {'label': 'Excplicit Convective Products', 'canonical': None, 'is_divider': True},
                 {'label': 'Composite Reflectivity', 'canonical': 'MDBZ'},
                 {'label': 'Reflectivity 1km', 'canonical': 'REFL1KM'},
+                {'label': 'Instability', 'canonical': None, 'is_divider': True},
+                {
+                    'label': 'Surface Based Convective Available Potential Energy',
+                    'canonical': 'SBCAPE',
+                },
             ],
             'Upper Air: Height, Wind, Temperature': [
                 {'label': 'Height and Wind', 'canonical': None, 'is_divider': True},
@@ -956,6 +980,8 @@ class WRFViewer(QMainWindow):
             if entry.get('canonical')
         }:
             self._var_aliases.setdefault(canonical.upper(), canonical.upper())
+
+        self._var_aliases.setdefault('SURFACE-BASED CAPE', 'SBCAPE')
 
         
         # --- Status Bar Progress (inline) ---
@@ -1201,13 +1227,15 @@ class WRFViewer(QMainWindow):
         
         idx = min(max(0, self.sld_time.value()), len(self.loader.frames) - 1)
         frame = self.loader.frames[idx]
-        
+
         try:
             pressure_hpa, temp_c, height_m, dewpoint_c = self.loader.get_sounding_profile(frame, lat, lon)
         except Exception as exc:
             QMessageBox.critical(self, 'Sounding failed', str(exc))
             return
-        
+
+        sbcape = surface_based_cape_from_profile(pressure_hpa, temp_c, dewpoint_c, height_m)
+
         wnd = SoundingWindow(
             frame.timestamp_str,
             lat,
@@ -1216,6 +1244,7 @@ class WRFViewer(QMainWindow):
             temperature_profile_c=temp_c,
             height_profile_m=height_m,
             dewpoint_profile_c=dewpoint_c,
+            sbcape_jkg=sbcape,
             parent=self,
         )
         wnd.show()
@@ -1601,6 +1630,8 @@ class WRFViewer(QMainWindow):
             # each category begins at an integer tick (0=rain, 1=snow, 2=mix, 3=sleet)
             # regardless of the intensity span we use inside each bucket.
             return -0.5, 4.0, 'Precipitation Type (in/hr rates)'
+        if v == 'SBCAPE':
+            return 0.0, 10000.0, 'Surface-based CAPE (J kg$^{-1}$)'
         return None, None, var
     
     def _title_text(self, display_var: str, canonical_var: str) -> str:
@@ -1622,6 +1653,8 @@ class WRFViewer(QMainWindow):
             return '2 m Temperature (°F)'
         if v == 'TD2F':
             return '2 m Dewpoint (°F)'
+        if v == 'SBCAPE':
+            return 'Surface-based CAPE (J kg$^{-1}$)'
         return display_var
     
     def _precip_type_style(self) -> tuple[ListedColormap, BoundaryNorm, list[int], list[str]]:

@@ -80,90 +80,219 @@ def virtual_temperature_profile(
     return vt_c
 
 
+def _surface_based_cape_profile(
+    pressure_hpa: np.ndarray,
+    temperature_c: np.ndarray,
+    dewpoint_c: np.ndarray,
+    height_m: np.ndarray,
+    *,
+    presorted: bool = False,
+) -> float:
+    '''
+    Surface-based CAPE (J/kg) for a single column using virtual temperature buoyancy.
+
+    The ``presorted`` flag allows callers that already enforce a surface-to-top
+    ordering to bypass an otherwise expensive per-column argsort.
+    '''
+
+    pres = np.asarray(pressure_hpa, dtype=float32)
+    temp_c = np.asarray(temperature_c, dtype=float32)
+    dew_c = np.asarray(dewpoint_c, dtype=float32)
+    hgt = np.asarray(height_m, dtype=float32)
+
+    valid = np.isfinite(pres) & np.isfinite(temp_c) & np.isfinite(dew_c) & np.isfinite(hgt)
+    if valid.sum() < 3:
+        return np.nan
+
+    pres = pres[valid]
+    temp_c = temp_c[valid]
+    dew_c = dew_c[valid]
+    hgt = hgt[valid]
+
+    if not presorted:
+        order = np.argsort(pres)[::-1]
+        pres = pres[order]
+        temp_c = temp_c[order]
+        dew_c = dew_c[order]
+        hgt = hgt[order]
+    elif pres[0] < pres[-1]:
+        # Ensure we integrate from the surface upward even if a caller claimed the
+        # data were presorted but provided a top-down profile.
+        pres = pres[::-1]
+        temp_c = temp_c[::-1]
+        dew_c = dew_c[::-1]
+        hgt = hgt[::-1]
+
+    vt_env_c = virtual_temperature_profile(pres, temp_c, dew_c)
+    vt_parcel_c = parcel_trace_temperature_profile(pres, temp_c, dew_c)
+
+    valid_vt = np.isfinite(vt_env_c) & np.isfinite(vt_parcel_c) & np.isfinite(hgt)
+    if valid_vt.sum() < 2:
+        return np.nan
+
+    vt_env_k = vt_env_c[valid_vt] + 273.15
+    vt_parcel_k = vt_parcel_c[valid_vt] + 273.15
+    hgt = hgt[valid_vt]
+
+    sort_h = np.argsort(hgt)
+    hgt = hgt[sort_h]
+    vt_env_k = vt_env_k[sort_h]
+    vt_parcel_k = vt_parcel_k[sort_h]
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        buoyancy = G0 * (vt_parcel_k - vt_env_k) / np.clip(vt_env_k, 1e-6, None)
+    positive = np.clip(buoyancy, 0.0, None)
+    if not np.isfinite(positive).any():
+        return np.nan
+
+    cape = np.trapz(positive, hgt)
+    return float(np.clip(cape, 0.0, None))
+
+
+def surface_based_cape_from_profile(
+    pressure_hpa: np.ndarray,
+    temperature_c: np.ndarray,
+    dewpoint_c: np.ndarray,
+    height_m: np.ndarray,
+) -> float:
+    '''
+    Convenience wrapper around the single-column SBCAPE calculator.
+    '''
+
+    return _surface_based_cape_profile(pressure_hpa, temperature_c, dewpoint_c, height_m)
+
+
+def surface_based_cape(
+    pressure_pa: np.ndarray,
+    temperature_k: np.ndarray,
+    rh_percent: np.ndarray,
+    height_m: np.ndarray,
+) -> np.ndarray:
+    '''
+    Compute surface-based CAPE (J/kg) for every gridpoint.
+    '''
+
+    pressure = np.asarray(pressure_pa, dtype=float32)
+    temp_k = np.asarray(temperature_k, dtype=float32)
+    rh = np.asarray(rh_percent, dtype=float32)
+    height = np.asarray(height_m, dtype=float32)
+
+    nz = min(pressure.shape[0], temp_k.shape[0], rh.shape[0], height.shape[0])
+    ny = min(pressure.shape[1], temp_k.shape[1], rh.shape[1], height.shape[1])
+    nx = min(pressure.shape[2], temp_k.shape[2], rh.shape[2], height.shape[2])
+    if nz < 3 or ny == 0 or nx == 0:
+        return np.full((ny, nx), np.nan, dtype=float32)
+
+    slicer = (slice(0, nz), slice(0, ny), slice(0, nx))
+    pressure = pressure[slicer]
+    temp_k = temp_k[slicer]
+    rh = rh[slicer]
+    height = height[slicer]
+
+    temp_c = temp_k - 273.15
+    with np.errstate(divide='ignore', invalid='ignore'):
+        gamma = np.log(np.clip(rh, 1e-6, 100.0) * 0.01) + (17.67 * temp_c) / (temp_c + 243.5)
+        dewpoint_c = (243.5 * gamma) / np.clip(17.67 - gamma, 1e-6, None)
+
+    # Normalize orientation to surface-first ordering so the vectorized ascent
+    # sweep runs monotonically upward.
+    surf_med = np.nanmedian(pressure[0, :, :])
+    top_med = np.nanmedian(pressure[-1, :, :])
+    if np.isfinite(surf_med) and np.isfinite(top_med) and surf_med < top_med:
+        pressure = pressure[::-1, :, :]
+        temp_k = temp_k[::-1, :, :]
+        temp_c = temp_c[::-1, :, :]
+        dewpoint_c = dewpoint_c[::-1, :, :]
+        height = height[::-1, :, :]
+
+    pressure_hpa = pressure / 100.0
+
+    # Flatten horizontal dimensions so the moist-adiabatic ascent loops only
+    # over vertical levels instead of every grid cell.
+    ncol = ny * nx
+    pres_flat = pressure_hpa.reshape(nz, ncol)
+    temp_flat = temp_k.reshape(nz, ncol)
+    dew_flat = dewpoint_c.reshape(nz, ncol)
+    hgt_flat = height.reshape(nz, ncol)
+
+    cape_flat = _surface_based_cape_profiles_vectorized(pres_flat, temp_flat, dew_flat, hgt_flat)
+    return cape_flat.reshape(ny, nx)
+
+
 def lcl_temperature_pressure(
     pressure_hpa: float, temperature_c: float, dewpoint_c: float
 ) -> tuple[float, float]:
     ''' Return LCL temperature (C) and pressure (hPa) via Bolton (1980).'''
-    
-    temp_k = temperature_c + 273.15
-    dewpoint_k = dewpoint_c + 273.15
+
+    temp_k = np.asarray(temperature_c, dtype=float32) + 273.15
+    dewpoint_k = np.asarray(dewpoint_c, dtype=float32) + 273.15
     with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
         tlcl_k = 1.0 / ((1.0 / (dewpoint_k - 56.0)) + (np.log(temp_k / dewpoint_k) / 800.0)) + 56.0
-    tlcl_k = float(np.clip(tlcl_k, 0.0, None))
-    plcl_hpa = float(pressure_hpa * np.power(tlcl_k / temp_k, CP / RD))
+    tlcl_k = np.clip(tlcl_k, 0.0, None)
+    plcl_hpa = np.asarray(pressure_hpa, dtype=float32) * np.power(tlcl_k / temp_k, CP / RD)
     return tlcl_k - 273.15, plcl_hpa
 
 
-def _moist_ascent_temperature(
-    start_pressure_hpa: float, start_temp_k: float, target_pressure_hpa: float
-) -> float:
-    ''' Integrate moist-adiabatic ascent temperature between two pressure levels.'''
-    
-    p = float(start_pressure_hpa)
-    temp = float(start_temp_k)
-    direction = -1.0 if target_pressure_hpa < start_pressure_hpa else 1.0
-    step = 1.0 * direction
-    
-    while (target_pressure_hpa - p) * direction > 1e-6:
-        next_p = p + step
-        if (next_p - target_pressure_hpa) * direction < 0.0:
-            next_p = target_pressure_hpa
-        
-        p_mid = 0.5 * (p + next_p)
-        temp_mid = temp
-        r_s = saturation_mixing_ratio(p_mid * 100.0, temp_mid)
-        
-        gamma_m = G0 * (1.0 + (LV * r_s) / (RD * temp_mid))
-        gamma_m /= CP + ((LV ** 2) * r_s * EPSILON) / (RD * (temp_mid ** 2))
-        
-        dp_pa = (next_p - p) * 100.0
-        dz = -RD * temp_mid * dp_pa / (p_mid * 100.0 * G0)
-        temp += -gamma_m * dz
-        p = next_p
-    
-    return temp
+def _moist_ascent_step(prev_p_hpa: np.ndarray, prev_temp_k: np.ndarray, target_p_hpa: np.ndarray) -> np.ndarray:
+    '''
+    Single hydrostatic moist-adiabatic step from ``prev_p_hpa`` to ``target_p_hpa``.
+
+    The calculation is vectorized across columns so a single call updates all
+    active profiles at the current level instead of iterating over gridpoints.
+    '''
+
+    p_mid = 0.5 * (prev_p_hpa + target_p_hpa)
+    temp_mid = prev_temp_k
+    r_s = saturation_mixing_ratio(p_mid * 100.0, temp_mid)
+
+    gamma_m = G0 * (1.0 + (LV * r_s) / (RD * temp_mid))
+    gamma_m /= CP + ((LV ** 2) * r_s * EPSILON) / (RD * (temp_mid ** 2))
+
+    dp_pa = (target_p_hpa - prev_p_hpa) * 100.0
+    dz = -RD * temp_mid * dp_pa / (p_mid * 100.0 * G0)
+    return temp_mid - gamma_m * dz
 
 
 def parcel_trace_temperature_profile(
     pressure_hpa: np.ndarray, temperature_c: np.ndarray, dewpoint_c: np.ndarray
 ) -> np.ndarray:
     ''' Surface-based parcel virtual temperature (C) along the provided pressure levels. '''
-    
+
     pres = np.asarray(pressure_hpa, dtype=float32)
     temp_c = np.asarray(temperature_c, dtype=float32)
     dew_c = np.asarray(dewpoint_c, dtype=float32)
-    
+
     valid = np.isfinite(pres) & np.isfinite(temp_c) & np.isfinite(dew_c)
     if valid.sum() < 2:
         return np.full_like(pres, np.nan, dtype=float32)
-    
+
     order = np.argsort(pres)[::-1]
     pres_sorted = pres[order]
     temp_sorted = temp_c[order]
     dew_sorted = dew_c[order]
-    
+
     surface_idx = 0
     surf_p = float(pres_sorted[surface_idx])
     surf_temp_c = float(temp_sorted[surface_idx])
     surf_dew_c = float(dew_sorted[surface_idx])
-    
+
     tlcl_c, plcl_hpa = lcl_temperature_pressure(surf_p, surf_temp_c, surf_dew_c)
     surf_temp_k = surf_temp_c + 273.15
     theta = surf_temp_k * np.power(1000.0 / surf_p, RD / CP)
-    
+
     # Parcel total water content remains constant below the LCL. Above the LCL
     # the parcel follows a saturated mixing ratio determined by its temperature
     # and pressure.
     surf_es = _saturation_water_pressure_pa(surf_dew_c)
     surf_r = EPSILON * surf_es / np.clip(surf_p * 100.0 - surf_es, 1e-6, None)
-    
+
     parcel_temps_k = np.full_like(pres_sorted, np.nan, dtype=float32)
     dry_mask = pres_sorted >= plcl_hpa
-    
+
     # Dry-adiabatic ascent from the surface to the LCL.
     if dry_mask.any():
         parcel_temps_k[dry_mask] = theta * np.power(pres_sorted[dry_mask] / 1000.0, RD / CP)
-    
+
     # Moist-adiabatic ascent above the LCL, stepping sequentially so curvature is preserved.
     if (~dry_mask).any():
         lcl_temp_k = theta * np.power(plcl_hpa / 1000.0, RD / CP)
@@ -171,29 +300,110 @@ def parcel_trace_temperature_profile(
         prev_temp_k = lcl_temp_k
         for idx in np.where(~dry_mask)[0]:
             p_level = float(pres_sorted[idx])
-            temp_k = _moist_ascent_temperature(prev_p, prev_temp_k, p_level)
+            temp_k = _moist_ascent_step(np.array(prev_p, dtype=float32), np.array(prev_temp_k, dtype=float32), np.array(p_level, dtype=float32))
             parcel_temps_k[idx] = temp_k
             prev_p = p_level
-            prev_temp_k = temp_k
-    
+            prev_temp_k = float(temp_k)
+
     # Convert parcel temperature to virtual temperature using the appropriate
     # mixing ratio profile.
     mixing_ratio = np.full_like(parcel_temps_k, np.nan, dtype=float32)
-    
+
     if dry_mask.any():
         mixing_ratio[dry_mask] = surf_r
-    
+
     if (~dry_mask).any():
         for idx in np.where(~dry_mask)[0]:
             p_level = float(pres_sorted[idx])
             temp_k = float(parcel_temps_k[idx])
             mixing_ratio[idx] = saturation_mixing_ratio(p_level * 100.0, temp_k)
-    
+
     parcel_virtual_k = virtual_temperature(parcel_temps_k, mixing_ratio)
     parcel_virtual_c = parcel_virtual_k - 273.15
-    
+
     inv_order = np.argsort(order)
     return parcel_virtual_c[inv_order]
+
+
+def _surface_based_cape_profiles_vectorized(
+    pressure_hpa: np.ndarray,
+    temperature_k: np.ndarray,
+    dewpoint_c: np.ndarray,
+    height_m: np.ndarray,
+) -> np.ndarray:
+    '''
+    Vectorized SBCAPE across all grid columns using a single vertical sweep.
+
+    Parameters expect ``pressure_hpa``, ``temperature_k``, ``dewpoint_c``, and
+    ``height_m`` with shape (nz, ncol) ordered surface-to-top.
+    '''
+
+    pres = np.asarray(pressure_hpa, dtype=float32)
+    temp_k = np.asarray(temperature_k, dtype=float32)
+    dew_c = np.asarray(dewpoint_c, dtype=float32)
+    hgt = np.asarray(height_m, dtype=float32)
+
+    nz, ncol = pres.shape
+    column_valid = np.isfinite(pres[0]) & np.isfinite(temp_k[0]) & np.isfinite(dew_c[0]) & np.isfinite(hgt[0])
+    sufficient_levels = np.isfinite(pres) & np.isfinite(temp_k) & np.isfinite(dew_c) & np.isfinite(hgt)
+    column_valid &= np.sum(sufficient_levels, axis=0) >= 3
+    if not column_valid.any():
+        return np.full(ncol, np.nan, dtype=float32)
+
+    surf_p = pres[0, column_valid]
+    surf_temp_c = temp_k[0, column_valid] - 273.15
+    surf_dew_c = dew_c[0, column_valid]
+
+    _, plcl_hpa = lcl_temperature_pressure(surf_p, surf_temp_c, surf_dew_c)
+    theta = (temp_k[0, column_valid]) * np.power(1000.0 / surf_p, RD / CP)
+    surf_es = _saturation_water_pressure_pa(surf_dew_c)
+    surf_r = EPSILON * surf_es / np.clip(surf_p * 100.0 - surf_es, 1e-6, None)
+
+    dry_profile = theta[None, :] * np.power(pres[:, column_valid] / 1000.0, RD / CP)
+    dry_mask = pres[:, column_valid] >= plcl_hpa
+
+    parcel_temps_k = np.full_like(pres[:, column_valid], np.nan, dtype=float32)
+    parcel_temps_k[dry_mask] = dry_profile[dry_mask]
+
+    lcl_temp_k = theta * np.power(plcl_hpa / 1000.0, RD / CP)
+    prev_temp = lcl_temp_k.astype(float32)
+    prev_p = plcl_hpa.astype(float32)
+
+    for level in range(nz):
+        p_level = pres[level, column_valid]
+        active = p_level < plcl_hpa
+        if not np.any(active):
+            continue
+        next_temp = _moist_ascent_step(prev_p[active], prev_temp[active], p_level[active])
+        parcel_temps_k[level, active] = next_temp
+        prev_temp[active] = next_temp
+        prev_p[active] = p_level[active]
+
+    mixing_ratio = np.full_like(parcel_temps_k, np.nan, dtype=float32)
+    if dry_mask.any():
+        mixing_ratio[dry_mask] = np.broadcast_to(surf_r, dry_mask.shape)[dry_mask]
+
+    sat_mr = saturation_mixing_ratio(pres[:, column_valid] * 100.0, parcel_temps_k)
+    moist_mask = ~dry_mask & np.isfinite(parcel_temps_k)
+    if moist_mask.any():
+        mixing_ratio[moist_mask] = sat_mr[moist_mask]
+
+    parcel_virtual_k = virtual_temperature(parcel_temps_k, mixing_ratio)
+    parcel_virtual_c = parcel_virtual_k - 273.15
+
+    env_mixing_ratio = _mixing_ratio_from_dewpoint(pres[:, column_valid], dew_c[:, column_valid])
+    env_virtual_k = virtual_temperature(temp_k[:, column_valid], env_mixing_ratio)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        buoyancy = G0 * (parcel_virtual_k - env_virtual_k) / np.clip(env_virtual_k, 1e-6, None)
+    buoyancy = np.clip(buoyancy, 0.0, None)
+
+    hgt_col = hgt[:, column_valid]
+    cape = np.trapz(buoyancy, hgt_col, axis=0)
+
+    result = np.full(ncol, np.nan, dtype=float32)
+    result[column_valid] = np.clip(cape, 0.0, None)
+    return result
 
 
 def ptype_rate_offset(rate: np.ndarray | float) -> np.ndarray | float:
