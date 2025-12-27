@@ -47,6 +47,7 @@ class SoundingWindow(QMainWindow):
         temperature_profile_c: np.ndarray  | None = None,
         height_profile_m: np.ndarray | None = None,
         dewpoint_profile_c: np.ndarray | None = None,
+        sbcape_jkg: float | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -69,6 +70,10 @@ class SoundingWindow(QMainWindow):
         )
         title_label.setStyleSheet('color: white; font-size: 18px; font-weight: 600;')
         header.addWidget(title_label)
+        if sbcape_jkg is not None and np.isfinite(sbcape_jkg):
+            cape_label = QLabel(f'SBCAPE: {sbcape_jkg:.0f} J/kg')
+            cape_label.setStyleSheet('color: white; font-size: 14px; padding-left: 18px;')
+            header.addWidget(cape_label)
         header.addStretch(1)
         
         btn_exit = QPushButton('Exit')
@@ -92,6 +97,7 @@ class SoundingWindow(QMainWindow):
         self._temperature_profile_c = temperature_profile_c
         self._height_profile_m = height_profile_m
         self._dewpoint_profile_c = dewpoint_profile_c
+        self._sbcape_jkg = sbcape_jkg
         
         self._draw_background()
         
