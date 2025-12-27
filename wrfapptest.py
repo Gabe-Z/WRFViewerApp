@@ -347,6 +347,39 @@ class WRFLoader(QtCore.QObject):
         while len(self._upper_base_cache) > self._upper_base_cache_limit:
             self._upper_base_cache.popitem(last=False)
         return fields
+
+    def get_sounding_profile(
+        self, frame: WRFFrame, latitude: float, longitude: float
+    ) -> tuple[np.ndarray, np.ndarray]:
+        '''Return a single-column temperature/pressure profile nearest the lat/lon.'''
+
+        lat_grid, lon_grid = self.get_geo(frame)
+        if lat_grid.size == 0 or lon_grid.size == 0:
+            raise RuntimeError('Latitude/longitude grid is empty; cannot extract sounding.')
+
+        dist2 = np.square(lat_grid - latitude) + np.square(lon_grid - longitude)
+        if not np.isfinite(dist2).any():
+            raise RuntimeError('Latitude/longitude grid has no finite coordinates.')
+
+        flat_idx = np.nanargmin(dist2)
+        y_idx, x_idx = np.unravel_index(flat_idx, lat_grid.shape)
+
+        base_fields = self._get_upper_base_fields(frame)
+        pressure_pa = base_fields['pressure'][:, y_idx, x_idx]
+        temp_c = base_fields['temperature'][:, y_idx, x_idx]
+
+        orient = ensure_pressure_orientation(frame.path, base_fields['pressure'], self._pressure_orientation)
+        if orient == 'ascending':
+            pressure_pa = pressure_pa[::-1]
+            temp_c = temp_c[::-1]
+
+        pressure_hpa = np.asarray(pressure_pa, dtype=float32) / 100.0
+        temp_c = np.asarray(temp_c, dtype=float32)
+        valid = np.isfinite(pressure_hpa) & np.isfinite(temp_c)
+        if valid.sum() < 2:
+            raise RuntimeError('Sounding column contains insufficient finite data to plot.')
+
+        return pressure_hpa[valid], temp_c[valid]
     
     def _total_precip_inches(self, nc: Dataset, frame: WRFFrame) -> np.ndarray:
         accum: T.Optional[np.ndarray] = None
@@ -1153,7 +1186,20 @@ class WRFViewer(QMainWindow):
         idx = min(max(0, self.sld_time.value()), len(self.loader.frames) - 1)
         frame = self.loader.frames[idx]
         
-        wnd = SoundingWindow(frame.timestamp_str, lat, lon, self)
+        try:
+            pressure_hpa, temp_c = self.loader.get_sounding_profile(frame, lat, lon)
+        except Exception as exc:
+            QMessageBox.critical(self, 'Sounding failed', str(exc))
+            return
+
+        wnd = SoundingWindow(
+            frame.timestamp_str,
+            lat,
+            lon,
+            pressure_profile_hpa=pressure_hpa,
+            temperature_profile_c=temp_c,
+            parent=self,
+        )
         wnd.show()
         wnd.showFullScreen()
         self._sounding_windows.append(wnd)
