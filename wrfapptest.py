@@ -950,33 +950,33 @@ class WRFViewer(QMainWindow):
         self.btn_load_cpt = QPushButton('Load CPT...')
         self.btn_load_cpt.clicked.connect(self.on_load_cpt)
         controls.addWidget(self.btn_load_cpt)
-
+        
         self.btn_preload = QPushButton('Preload current variable')
         self.btn_preload.clicked.connect(self.on_preload)
         controls.addWidget(self.btn_preload)
-
+        
         self.btn_export = QPushButton('Export PNG...')
         self.btn_export.clicked.connect(self.on_export_png)
         controls.addWidget(self.btn_export)
-
+        
         self.btn_generate_sounding = QPushButton('Generate Sounding')
         self.btn_generate_sounding.clicked.connect(self.on_generate_sounding)
         controls.addWidget(self.btn_generate_sounding)
-
-        controls.addWidget(QLabel('Latitude:'))
+        
+        controls.addWidget(QLabel('Latitude: '))
         self.lat_input = QLineEdit()
         self.lat_input.setPlaceholderText('Click map or enter')
         self.lat_input.setFixedWidth(110)
         controls.addWidget(self.lat_input)
-
-        controls.addWidget(QLabel('Longitude:'))
+        
+        controls.addWidget(QLabel('Longitude: '))
         self.lon_input = QLineEdit()
         self.lon_input.setPlaceholderText('Click map or enter')
         self.lon_input.setFixedWidth(110)
         controls.addWidget(self.lon_input)
-
+        
         controls.addStretch(1)
-
+        
         self.btn_play = QPushButton('▶ Play')
         self.btn_play.setCheckable(True)
         self.btn_play.clicked.connect(self.on_toggle_play)
@@ -1127,14 +1127,14 @@ class WRFViewer(QMainWindow):
             return
         if event.xdata is None or event.ydata is None:
             return
-
-        self.lat_input.setText(f"{event.ydata:.4f}")
-        self.lon_input.setText(f"{event.xdata:.4f}")
-
+            
+        self.lat_input.setText(f'{event.ydata:.4f}')
+        self.lon_input.setText(f'{event.xdata:.4f}')
+    
     def on_generate_sounding(self):
         lat_text = self.lat_input.text().strip()
         lon_text = self.lon_input.text().strip()
-
+        
         try:
             lat = float(lat_text)
             lon = float(lon_text)
@@ -1145,19 +1145,19 @@ class WRFViewer(QMainWindow):
                 'Enter numeric latitude and longitude values or click the map.',
             )
             return
-
+        
         if not self.loader.frames:
             QMessageBox.warning(self, 'No data loaded', 'Open wrfout data before generating a sounding.')
             return
-
+        
         idx = min(max(0, self.sld_time.value()), len(self.loader.frames) - 1)
         frame = self.loader.frames[idx]
-
+        
         wnd = SoundingWindow(frame.timestamp_str, lat, lon, self)
         wnd.show()
         wnd.showFullScreen()
         self._sounding_windows.append(wnd)
-
+    
     def on_open(self):
         dlg = QFileDialog(self, 'Select wrfout files', os.getcwd(), 'WRF NetCDF (wrfout_*);;All files (*)')
         dlg.setFileMode(QFileDialog.ExistingFiles)
