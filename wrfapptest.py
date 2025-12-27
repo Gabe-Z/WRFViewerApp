@@ -367,21 +367,20 @@ class WRFLoader(QtCore.QObject):
         base_fields = self._get_upper_base_fields(frame)
         pressure_pa = base_fields['pressure'][:, y_idx, x_idx]
         temp_c = base_fields['temperature'][:, y_idx, x_idx]
-        height_m = base_fields['height'][:, y_idx, x_idx]
-
+        height_m = base_fields['height'][:, :y_idx, :x_idx]
+        
         orient = ensure_pressure_orientation(frame.path, base_fields['pressure'], self._pressure_orientation)
         if orient == 'ascending':
             pressure_pa = pressure_pa[::-1]
             temp_c = temp_c[::-1]
             height_m = height_m[::-1]
-
+        
         pressure_hpa = np.asarray(pressure_pa, dtype=float32) / 100.0
         temp_c = np.asarray(temp_c, dtype=float32)
-        height_m = np.asarray(height_m, dtype=float32)
-        valid = np.isfinite(pressure_hpa) & np.isfinite(temp_c) & np.isfinite(height_m)
+        valid = np.isfinite(pressure_hpa) & np.isfinite(temp_c)
         if valid.sum() < 2:
             raise RuntimeError('Sounding column contains insufficient finite data to plot.')
-
+        
         return pressure_hpa[valid], temp_c[valid], height_m[valid]
     
     def _total_precip_inches(self, nc: Dataset, frame: WRFFrame) -> np.ndarray:
@@ -1194,7 +1193,7 @@ class WRFViewer(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, 'Sounding failed', str(exc))
             return
-
+        
         wnd = SoundingWindow(
             frame.timestamp_str,
             lat,

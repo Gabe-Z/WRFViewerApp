@@ -19,20 +19,20 @@ from calc import (
 
 
 def _standard_atmosphere_pressure(height_m: float) -> float:
-    pressure0 = 1013.25  # hPa
+    pressure0 = 1013.25 # hPa
     if height_m < 0:
         return pressure0
-
-    # Troposphere (up to ~11 km): gradient temperature layer.
+    
+    # Troposhere (up to ~11 km): gradient temperature layer.
     if height_m <= 11000.0:
         return pressure0 * np.power(1.0 - 2.25577e-5 * height_m, 5.25588)
-
+    
     # Lower stratosphere (11-20 km): isothermal layer.
-    p11 = pressure0 * np.power(1.0 - 2.25577e-5 * 11000.0, 5.25588)
-    t11 = 216.65  # K
-    g0 = 9.80665  # m/s^2
-    r = 287.053  # J/(kg*K)
-    return p11 * np.exp(-g0 * (height_m - 11000.0) / (r * t11))
+    pl1 = pressure0 * np.power(1.0 - 2.25577e-5 * 11000.0, 5.25588)
+    tl1 = 216.65 # K
+    g0 = 9.80665 # m/s^2
+    r = 287.053 # J/(kg*K)
+    return pl1 * np.exp(-g0 * (height_m - 11000.0) / (r * tl1))
 
 
 class SoundingWindow(QMainWindow):
@@ -88,9 +88,9 @@ class SoundingWindow(QMainWindow):
         self._pressure_profile_hpa = pressure_profile_hpa
         self._temperature_profile_c = temperature_profile_c
         self._height_profile_m = height_profile_m
-
+        
         self._draw_background()
-
+        
         if pressure_profile_hpa is not None and temperature_profile_c is not None:
             self._plot_temperature_profile(pressure_profile_hpa, temperature_profile_c)
     
@@ -144,23 +144,23 @@ class SoundingWindow(QMainWindow):
         self.ax.set_ylabel('Pressure (hPa)', color='white', labelpad=12)
         
         self.figure.tight_layout(rect=[0.04, 0.02, 0.98, 0.98])
-
+        
         self._add_height_markers()
-
+    
     def _add_height_markers(self) -> None:
         height_km_levels = [0, 1, 3, 6, 9, 12, 15]
         transform = transforms.blended_transform_factory(
             self.ax.transAxes, self.ax.transData
         )
-
+        
         pressure_profile = getattr(self, '_pressure_profile_hpa', None)
         height_profile = getattr(self, '_height_profile_m', None)
         pressure_from_profile = None
-
+        
         if pressure_profile is not None and height_profile is not None:
             pres = np.asarray(pressure_profile, dtype=float)
             hgt = np.asarray(height_profile, dtype=float)
-
+            
             if hgt.ndim > 1:
                 if hgt.shape[0] == pres.shape[0]:
                     # Collapse horizontal dimensions to a 1-D column when the
@@ -172,7 +172,7 @@ class SoundingWindow(QMainWindow):
                     hgt = hgt.reshape(pres.shape)
                 else:
                     hgt = np.asarray([], dtype=float)
-
+            
             valid = np.isfinite(pres) & np.isfinite(hgt)
             if valid.sum() >= 2:
                 pres = pres[valid]
@@ -182,10 +182,10 @@ class SoundingWindow(QMainWindow):
                 order = np.argsort(hgt_agl)
                 hgt_agl_sorted = hgt_agl[order]
                 pres_sorted = pres[order]
-
+                
                 def pressure_from_profile(height_m: float) -> float:
                     if height_m < hgt_agl_sorted[0] or height_m > hgt_agl_sorted[-1]:
-                        return np.nan
+                        return
                     return float(
                         np.interp(
                             height_m,
@@ -195,7 +195,7 @@ class SoundingWindow(QMainWindow):
                             right=np.nan,
                         )
                     )
-
+        
         for height_km in height_km_levels:
             height_m = height_km * 1000.0
             pressure_hpa = (
@@ -205,9 +205,9 @@ class SoundingWindow(QMainWindow):
             )
             if not np.isfinite(pressure_hpa):
                 continue
-
+            
             self.ax.plot(
-                [0.0, 0.04],
+                [0.001, 0.02],
                 [pressure_hpa, pressure_hpa],
                 transform=transform,
                 color='red',
@@ -216,7 +216,7 @@ class SoundingWindow(QMainWindow):
                 zorder=5,
             )
             self.ax.text(
-                0.045,
+                0.025,
                 pressure_hpa,
                 f'{height_km} km',
                 transform=transform,
@@ -224,6 +224,12 @@ class SoundingWindow(QMainWindow):
                 fontsize=9,
                 va='center',
                 ha='left',
+                bbox={
+                'facecolor': 'black',
+                'edgecolor': 'none',
+                'alpha': 0.5,
+                'pad': 2.5,
+                },
                 clip_on=False,
                 zorder=5,
             )
