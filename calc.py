@@ -311,10 +311,10 @@ def sounding_skewed_isotherm(
     even when the plot is wider than it is tall, preventing the warm lines from
     running off the chart.
     '''
-
+    
     temp_min, temp_max = sounding_temperature_bounds()
     bottom, top = sounding_pressure_bounds()
-
+    
     # When the y-axis uses logarithmic pressure, the apparent spacing between
     # levels follows log(p) rather than a linear delta in hPa. Base the skew on
     # the log-distance from the bottom pressure so the guideline remains a
@@ -324,7 +324,7 @@ def sounding_skewed_isotherm(
     span_log = bottom_log - top_log
     if span_log == 0:
         return np.full_like(pressures, temp_c, dtype=float32)
-
+    
     skew_per_logp = np.tan(np.deg2rad(angle_deg)) * aspect_correction
     scale = (temp_max - temp_min) / span_log
     offsets = (bottom_log - np.log(pressures)) * skew_per_logp * scale
