@@ -393,11 +393,21 @@ class WRFLoader(QtCore.QObject):
             gamma = np.log(np.clip(rh, 1e-6, 100.0) * 0.01) + (17.67 * temp_c) / (temp_c + 243.5)
             dewpoint_c = (243.5 * gamma) / (17.67 - gamma)
             
-        valid = np.isfinite(pressure_hpa) & np.isfinite(temp_c)
-        if valid.sum() < 2:
+        valid = (
+            np.isfinite(pressure_hpa)
+            & np.isfinite(temp_c)
+            & np.isfinite(height_m)
+            & np.isfinite(dewpoint_c)
+        )
+        if valid.sum() < 3:
             raise RuntimeError('Sounding column contains insufficient finite data to plot.')
-        
-        return pressure_hpa[valid], temp_c[valid], height_m[valid], dewpoint_c[valid]
+
+        return (
+            pressure_hpa[valid],
+            temp_c[valid],
+            height_m[valid],
+            dewpoint_c[valid],
+        )
     
     def _total_precip_inches(self, nc: Dataset, frame: WRFFrame) -> np.ndarray:
         accum: T.Optional[np.ndarray] = None
