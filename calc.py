@@ -295,29 +295,37 @@ def sounding_pressure_bounds() -> tuple[float, float]:
 
 
 def sounding_skewed_isotherm(
-    temp_c: float,
+    temp_c: np.ndarray | float,
     pressures: np.ndarray,
     angle_deg: float = 45.0,
     aspect_correction: float = 1.0,
 ) -> np.ndarray:
-    ''' Return x-values for a skewed isotherm across the provided pressures.
-    
+    '''Return x-values for a skewed isotherm across the provided pressures.
+
+    ``temp_c`` may be a scalar or an array matching ``pressures``. The returned
+    values maintain the same shape so that profile points and background
+    guidelines share the identical skew mapping.
+
     ``aspect_correction`` is a multiplicative factor to account for the current
     axes pixel aspect (height / width). This keeps the drawn isotherms visible
     even when the plot is wider than it is tall, preventing the warm lines from
     running off the chart.
     '''
-    
+
     temp_min, temp_max = sounding_temperature_bounds()
     bottom, top = sounding_pressure_bounds()
-    span = bottom - top
-    if span == 0:
+
+    # When the y-axis uses logarithmic pressure, the apparent spacing between
+    # levels follows log(p) rather than a linear delta in hPa. Base the skew on
+    # the log-distance from the bottom pressure so the guideline remains a
+    # straight line in plot space instead of bowing inward.
+    bottom_log = np.log(bottom)
+    top_log = np.log(top)
+    span_log = bottom_log - top_log
+    if span_log == 0:
         return np.full_like(pressures, temp_c, dtype=float32)
-    
-    # Anchor each line at its un-skewed temperature at the bottom of the
-    # sounding and skew upward. This keeps the warm guidelines visible near the
-    # surface while still projecting them to the right aloft.
-    skew_per_hpa = np.tan(np.deg2rad(angle_deg)) * aspect_correction
-    scale = (temp_max - temp_min) / span
-    offsets = (bottom - pressures) * skew_per_hpa * scale
+
+    skew_per_logp = np.tan(np.deg2rad(angle_deg)) * aspect_correction
+    scale = (temp_max - temp_min) / span_log
+    offsets = (bottom_log - np.log(pressures)) * skew_per_logp * scale
     return np.asarray(temp_c + offsets, dtype=float32)
