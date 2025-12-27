@@ -44,6 +44,7 @@ class SoundingWindow(QMainWindow):
         pressure_profile_hpa: np.ndarray | None = None,
         temperature_profile_c: np.ndarray  | None = None,
         height_profile_m: np.ndarray | None = None,
+        dewpoint_profile_c: np.ndarray | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -88,11 +89,14 @@ class SoundingWindow(QMainWindow):
         self._pressure_profile_hpa = pressure_profile_hpa
         self._temperature_profile_c = temperature_profile_c
         self._height_profile_m = height_profile_m
+        self._dewpoint_profile_c = dewpoint_profile_c
         
         self._draw_background()
         
         if pressure_profile_hpa is not None and temperature_profile_c is not None:
             self._plot_temperature_profile(pressure_profile_hpa, temperature_profile_c)
+        if pressure_profile_hpa is not None and dewpoint_profile_c is not None:
+            self._plot_dewpoint_profile(pressure_profile_hpa, dewpoint_profile_c)
     
     def _draw_background(self) -> None:
         temp_min, temp_max = sounding_temperature_bounds()
@@ -271,6 +275,49 @@ class SoundingWindow(QMainWindow):
             fontsize=10,
             va='center',
             ha='left',
+            bbox={
+                'facecolor': 'black',
+                'edgecolor': 'none',
+                'alpha': 0.5,
+                'pad': 2.5,
+            },
+            zorder=7,
+        )
+        self.figure.canvas.draw_idle()
+
+    def _plot_dewpoint_profile(self, pressure_hpa: np.ndarray, dewpoint_c: np.ndarray) -> None:
+        valid = np.isfinite(pressure_hpa) & np.isfinite(dewpoint_c)
+        if valid.sum() < 2:
+            return
+
+        skewed_temps = sounding_skewed_isotherm(
+            dewpoint_c[valid],
+            pressure_hpa[valid],
+            aspect_correction=getattr(self, '_aspect_correction', 1.0),
+        )
+
+        self.ax.plot(
+            skewed_temps,
+            pressure_hpa[valid],
+            color='lime',
+            linewidth=2.0,
+            zorder=6,
+        )
+
+        surface_idx = int(np.nanargmax(pressure_hpa[valid]))
+        surface_dewpoint_c = float(dewpoint_c[valid][surface_idx])
+        surface_dewpoint_f = surface_dewpoint_c * 9.0 / 5.0 + 32.0
+        surface_pressure = float(pressure_hpa[valid][surface_idx])
+        surface_x = float(skewed_temps[surface_idx])
+        label_offset = 0.8
+        self.ax.text(
+            surface_x - label_offset,
+            surface_pressure,
+            f'{surface_dewpoint_f:.1f}°F',
+            color='lime',
+            fontsize=10,
+            va='center',
+            ha='right',
             bbox={
                 'facecolor': 'black',
                 'edgecolor': 'none',
