@@ -350,8 +350,12 @@ class WRFLoader(QtCore.QObject):
     
     def get_sounding_profile(
         self, frame: WRFFrame, latitude: float, longitude: float
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        ''' Return a single-column temperature/pressure/height profile nearest the lat/lon. '''
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        '''
+        Return a single-column temperature/pressure/height profile nearest the lat/lon.
+
+        Also returns dewpoint (°C) computed from the column relative humidity.
+        '''
         
         lat_grid, lon_grid = self.get_geo(frame)
         if lat_grid.size == 0 or lon_grid.size == 0:
@@ -367,21 +371,30 @@ class WRFLoader(QtCore.QObject):
         base_fields = self._get_upper_base_fields(frame)
         pressure_pa = base_fields['pressure'][:, y_idx, x_idx]
         temp_c = base_fields['temperature'][:, y_idx, x_idx]
-        height_m = base_fields['height'][:, :y_idx, :x_idx]
+        height_m = base_fields['height'][:, y_idx, x_idx]
+        rh = base_fields['rh'][:, y_idx, x_idx]
         
         orient = ensure_pressure_orientation(frame.path, base_fields['pressure'], self._pressure_orientation)
         if orient == 'ascending':
             pressure_pa = pressure_pa[::-1]
             temp_c = temp_c[::-1]
             height_m = height_m[::-1]
-        
+            rh = rh[::-1]
+
         pressure_hpa = np.asarray(pressure_pa, dtype=float32) / 100.0
         temp_c = np.asarray(temp_c, dtype=float32)
+        rh = np.asarray(rh, dtype=float32)
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            # Magnus formula using relative humidity percent and temperature in Celsius.
+            gamma = np.log(np.clip(rh, 1e-6, 100.0) * 0.01) + (17.67 * temp_c) / (temp_c + 243.5)
+            dewpoint_c = (243.5 * gamma) / (17.67 - gamma)
+
         valid = np.isfinite(pressure_hpa) & np.isfinite(temp_c)
         if valid.sum() < 2:
             raise RuntimeError('Sounding column contains insufficient finite data to plot.')
-        
-        return pressure_hpa[valid], temp_c[valid], height_m[valid]
+
+        return pressure_hpa[valid], temp_c[valid], height_m[valid], dewpoint_c[valid]
     
     def _total_precip_inches(self, nc: Dataset, frame: WRFFrame) -> np.ndarray:
         accum: T.Optional[np.ndarray] = None
@@ -1189,7 +1202,7 @@ class WRFViewer(QMainWindow):
         frame = self.loader.frames[idx]
         
         try:
-            pressure_hpa, temp_c, height_m = self.loader.get_sounding_profile(frame, lat, lon)
+            pressure_hpa, temp_c, height_m, dewpoint_c = self.loader.get_sounding_profile(frame, lat, lon)
         except Exception as exc:
             QMessageBox.critical(self, 'Sounding failed', str(exc))
             return
@@ -1201,6 +1214,7 @@ class WRFViewer(QMainWindow):
             pressure_profile_hpa=pressure_hpa,
             temperature_profile_c=temp_c,
             height_profile_m=height_m,
+            dewpoint_profile_c=dewpoint_c,
             parent=self,
         )
         wnd.show()
