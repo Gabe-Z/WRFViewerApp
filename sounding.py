@@ -6,10 +6,21 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.ticker import MultipleLocator
 from matplotlib import transforms
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QMainWindow,
+    QVBoxLayout,
+    QWidget,
+)
 
 from calc import (
+    mixed_layer_parcel_source,
+    parcel_cape_cinh_from_profile,
     parcel_trace_temperature_profile,
+    most_unstable_parcel_source,
     sounding_isotherm_temperatures,
     sounding_pressure_bounds,
     sounding_pressure_levels,
@@ -70,10 +81,6 @@ class SoundingWindow(QMainWindow):
         )
         title_label.setStyleSheet('color: white; font-size: 18px; font-weight: 600;')
         header.addWidget(title_label)
-        if sbcape_jkg is not None and np.isfinite(sbcape_jkg):
-            cape_label = QLabel(f'SBCAPE: {sbcape_jkg:.0f} J/kg')
-            cape_label.setStyleSheet('color: white; font-size: 14px; padding-left: 18px;')
-            header.addWidget(cape_label)
         header.addStretch(1)
         
         btn_exit = QPushButton('Exit')
@@ -98,7 +105,7 @@ class SoundingWindow(QMainWindow):
         self._height_profile_m = height_profile_m
         self._dewpoint_profile_c = dewpoint_profile_c
         self._sbcape_jkg = sbcape_jkg
-        
+
         self._draw_background()
         
         if pressure_profile_hpa is not None and temperature_profile_c is not None:
@@ -120,6 +127,16 @@ class SoundingWindow(QMainWindow):
         ):
             self._plot_parcel_trace(
                 pressure_profile_hpa, temperature_profile_c, dewpoint_profile_c
+            )
+
+        if (
+            pressure_profile_hpa is not None
+            and temperature_profile_c is not None
+            and dewpoint_profile_c is not None
+            and height_profile_m is not None
+        ):
+            self._add_parcel_indices_section(
+                pressure_profile_hpa, temperature_profile_c, dewpoint_profile_c, height_profile_m
             )
         
     def _draw_background(self) -> None:
@@ -172,8 +189,126 @@ class SoundingWindow(QMainWindow):
         self.ax.set_ylabel('Pressure (hPa)', color='white', labelpad=12)
         
         self.figure.tight_layout(rect=[0.04, 0.02, 0.98, 0.98])
-        
+
         self._add_height_markers()
+
+    def _cape_color(self, value: float) -> str:
+        if not np.isfinite(value):
+            return '#a0a0a0'
+        if value >= 4000.0:
+            return 'purple'
+        if value >= 3000.0:
+            return 'red'
+        if value >= 2000.0:
+            return 'yellow'
+        return 'white'
+
+    def _cinh_color(self, value: float) -> str:
+        if not np.isfinite(value):
+            return '#a0a0a0'
+        if value <= -100.0:
+            return 'maroon'
+        if value <= -50.0:
+            return 'brown'
+        if value <= 0.0:
+            return 'green'
+        return 'green'
+
+    def _format_parcel_value(self, value: float) -> str:
+        if not np.isfinite(value):
+            return 'N/A'
+        return f'{value:.0f} J/kg'
+
+    def _add_parcel_row(
+        self, grid: QVBoxLayout | QGridLayout, row_index: int, label: str, cape: float, cinh: float
+    ) -> None:
+        label_widget = QLabel(label)
+        label_widget.setStyleSheet('color: white; font-size: 13px; font-weight: 600;')
+        label_widget.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        cape_widget = QLabel(self._format_parcel_value(cape))
+        cape_widget.setStyleSheet(f'color: {self._cape_color(cape)}; font-size: 13px;')
+        cape_widget.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        cinh_widget = QLabel(self._format_parcel_value(cinh))
+        cinh_widget.setStyleSheet(f'color: {self._cinh_color(cinh)}; font-size: 13px;')
+        cinh_widget.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        grid.addWidget(label_widget, row_index, 0)
+        grid.addWidget(cape_widget, row_index, 1)
+        grid.addWidget(cinh_widget, row_index, 2)
+
+    def _add_parcel_indices_section(
+        self,
+        pressure_hpa: np.ndarray,
+        temperature_c: np.ndarray,
+        dewpoint_c: np.ndarray,
+        height_m: np.ndarray,
+    ) -> None:
+        container = QWidget(self)
+        container.setStyleSheet('background-color: #1b1b1b; border: 1px solid #3a3a3a;')
+        section = QGridLayout(container)
+        section.setContentsMargins(12, 12, 12, 12)
+        section.setHorizontalSpacing(18)
+        section.setVerticalSpacing(6)
+        section.setColumnStretch(0, 2)
+        section.setColumnStretch(1, 1)
+        section.setColumnStretch(2, 1)
+
+        for col, text in enumerate(('Parcel', 'CAPE', 'CINH')):
+            lbl = QLabel(text)
+            lbl.setStyleSheet('color: white; font-size: 13px; font-weight: 700;')
+            lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            section.addWidget(lbl, 0, col)
+
+        sb_cape, sb_cinh = parcel_cape_cinh_from_profile(
+            pressure_hpa, temperature_c, dewpoint_c, height_m
+        )
+
+        mu_p, mu_temp, mu_dew = most_unstable_parcel_source(
+            pressure_hpa, temperature_c, dewpoint_c
+        )
+        mu_cape, mu_cinh = parcel_cape_cinh_from_profile(
+            pressure_hpa,
+            temperature_c,
+            dewpoint_c,
+            height_m,
+            start_pressure_hpa=mu_p if np.isfinite(mu_p) else None,
+            start_temperature_c=mu_temp if np.isfinite(mu_temp) else None,
+            start_dewpoint_c=mu_dew if np.isfinite(mu_dew) else None,
+        )
+
+        ml_p, ml_temp, ml_dew = mixed_layer_parcel_source(
+            pressure_hpa, temperature_c, dewpoint_c
+        )
+        ml_cape, ml_cinh = parcel_cape_cinh_from_profile(
+            pressure_hpa,
+            temperature_c,
+            dewpoint_c,
+            height_m,
+            start_pressure_hpa=ml_p if np.isfinite(ml_p) else None,
+            start_temperature_c=ml_temp if np.isfinite(ml_temp) else None,
+            start_dewpoint_c=ml_dew if np.isfinite(ml_dew) else None,
+        )
+
+        self._add_parcel_row(section, 1, 'Surface-Based Parcel', sb_cape, sb_cinh)
+        self._add_parcel_row(section, 2, 'Most Unstable Parcel', mu_cape, mu_cinh)
+        self._add_parcel_row(section, 3, 'Mixed Layer Parcel', ml_cape, ml_cinh)
+
+        # Align the parcel indices with the Skew-T's y-axis by offsetting the
+        # widget by the axes' left position within the canvas.
+        self.canvas.draw()
+        axes_pos = self.ax.get_position()
+        axis_left_px = axes_pos.x0 * self.figure.get_figwidth() * self.figure.dpi
+        left_pad = max(int(axis_left_px), 0)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addSpacing(left_pad)
+        row.addWidget(container, alignment=Qt.AlignLeft | Qt.AlignTop)
+        row.addStretch(1)
+
+        self.centralWidget().layout().addLayout(row)
     
     def _add_height_markers(self) -> None:
         height_km_levels = [0, 1, 3, 6, 9, 12, 15]

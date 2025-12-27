@@ -130,6 +130,7 @@ def _surface_based_cape_profile(
     if valid_vt.sum() < 2:
         return np.nan
     
+    pres = pres[valid_vt]
     vt_env_k = vt_env_c[valid_vt] + 273.15
     vt_parcel_k = vt_parcel_c[valid_vt] + 273.15
     hgt = hgt[valid_vt]
@@ -254,75 +255,86 @@ def _moist_ascent_step(prev_p_hpa: np.ndarray, prev_temp_k: np.ndarray, target_p
 
 
 def parcel_trace_temperature_profile(
-    pressure_hpa: np.ndarray, temperature_c: np.ndarray, dewpoint_c: np.ndarray
+    pressure_hpa: np.ndarray,
+    temperature_c: np.ndarray,
+    dewpoint_c: np.ndarray,
+    *,
+    start_pressure_hpa: float | None = None,
+    start_temperature_c: float | None = None,
+    start_dewpoint_c: float | None = None,
 ) -> np.ndarray:
-    ''' Surface-based parcel virtual temperature (C) along the provided pressure levels. '''
-    
+    ''' Parcel virtual temperature (C) along the provided pressure levels. '''
+
     pres = np.asarray(pressure_hpa, dtype=float32)
     temp_c = np.asarray(temperature_c, dtype=float32)
     dew_c = np.asarray(dewpoint_c, dtype=float32)
-    
+
     valid = np.isfinite(pres) & np.isfinite(temp_c) & np.isfinite(dew_c)
     if valid.sum() < 2:
         return np.full_like(pres, np.nan, dtype=float32)
-    
+
     order = np.argsort(pres)[::-1]
     pres_sorted = pres[order]
     temp_sorted = temp_c[order]
     dew_sorted = dew_c[order]
-    
-    surface_idx = 0
-    surf_p = float(pres_sorted[surface_idx])
-    surf_temp_c = float(temp_sorted[surface_idx])
-    surf_dew_c = float(dew_sorted[surface_idx])
-    
-    tlcl_c, plcl_hpa = lcl_temperature_pressure(surf_p, surf_temp_c, surf_dew_c)
-    surf_temp_k = surf_temp_c + 273.15
-    theta = surf_temp_k * np.power(1000.0 / surf_p, RD / CP)
-    
+    n_levels = pres_sorted.size
+
+    start_idx = 0 if start_pressure_hpa is None else int(np.nanargmin(np.abs(pres_sorted - start_pressure_hpa)))
+    start_p = float(start_pressure_hpa) if start_pressure_hpa is not None else float(pres_sorted[start_idx])
+    start_temp_c = float(start_temperature_c) if start_temperature_c is not None else float(temp_sorted[start_idx])
+    start_dew_c = float(start_dewpoint_c) if start_dewpoint_c is not None else float(dew_sorted[start_idx])
+
+    pres_start = pres_sorted[start_idx:]
+
+    tlcl_c, plcl_hpa = lcl_temperature_pressure(start_p, start_temp_c, start_dew_c)
+    start_temp_k = start_temp_c + 273.15
+    theta = start_temp_k * np.power(1000.0 / start_p, RD / CP)
+
     # Parcel total water content remains constant below the LCL. Above the LCL
     # the parcel follows a saturated mixing ratio determined by its temperature
     # and pressure.
-    surf_es = _saturation_water_pressure_pa(surf_dew_c)
-    surf_r = EPSILON * surf_es / np.clip(surf_p * 100.0 - surf_es, 1e-6, None)
-    
-    parcel_temps_k = np.full_like(pres_sorted, np.nan, dtype=float32)
-    dry_mask = pres_sorted >= plcl_hpa
-    
-    # Dry-adiabatic ascent from the surface to the LCL.
+    surf_es = _saturation_water_pressure_pa(start_dew_c)
+    surf_r = EPSILON * surf_es / np.clip(start_p * 100.0 - surf_es, 1e-6, None)
+
+    parcel_temps_k = np.full_like(pres_start, np.nan, dtype=float32)
+    dry_mask = pres_start >= plcl_hpa
+
+    # Dry-adiabatic ascent from the start level to the LCL.
     if dry_mask.any():
-        parcel_temps_k[dry_mask] = theta * np.power(pres_sorted[dry_mask] / 1000.0, RD / CP)
-    
+        parcel_temps_k[dry_mask] = theta * np.power(pres_start[dry_mask] / 1000.0, RD / CP)
+
     # Moist-adiabatic ascent above the LCL, stepping sequentially so curvature is preserved.
     if (~dry_mask).any():
         lcl_temp_k = theta * np.power(plcl_hpa / 1000.0, RD / CP)
         prev_p = plcl_hpa
         prev_temp_k = lcl_temp_k
         for idx in np.where(~dry_mask)[0]:
-            p_level = float(pres_sorted[idx])
+            p_level = float(pres_start[idx])
             temp_k = _moist_ascent_step(np.array(prev_p, dtype=float32), np.array(prev_temp_k, dtype=float32), np.array(p_level, dtype=float32))
             parcel_temps_k[idx] = temp_k
             prev_p = p_level
             prev_temp_k = float(temp_k)
-    
+
     # Convert parcel temperature to virtual temperature using the appropriate
     # mixing ratio profile.
     mixing_ratio = np.full_like(parcel_temps_k, np.nan, dtype=float32)
-    
+
     if dry_mask.any():
         mixing_ratio[dry_mask] = surf_r
-    
+
     if (~dry_mask).any():
         for idx in np.where(~dry_mask)[0]:
-            p_level = float(pres_sorted[idx])
+            p_level = float(pres_start[idx])
             temp_k = float(parcel_temps_k[idx])
             mixing_ratio[idx] = saturation_mixing_ratio(p_level * 100.0, temp_k)
-    
+
     parcel_virtual_k = virtual_temperature(parcel_temps_k, mixing_ratio)
     parcel_virtual_c = parcel_virtual_k - 273.15
-    
+    full_profile = np.full(n_levels, np.nan, dtype=float32)
+    full_profile[start_idx:] = parcel_virtual_c
+
     inv_order = np.argsort(order)
-    return parcel_virtual_c[inv_order]
+    return full_profile[inv_order]
 
 
 def _surface_based_cape_profiles_vectorized(
@@ -404,6 +416,256 @@ def _surface_based_cape_profiles_vectorized(
     result = np.full(ncol, np.nan, dtype=float32)
     result[column_valid] = np.clip(cape, 0.0, None)
     return result
+
+
+def _dewpoint_from_mixing_ratio(mixing_ratio: float, pressure_hpa: float) -> float:
+    ''' Dewpoint (°C) from mixing ratio (kg/kg) and pressure (hPa). '''
+
+    pressure_pa = pressure_hpa * 100.0
+    es = (mixing_ratio * pressure_pa) / np.clip(EPSILON + mixing_ratio, 1e-6, None)
+    es = np.clip(es, 1e-6, None)
+    log_term = np.log(es / 611.2)
+    return float((243.5 * log_term) / np.clip(17.67 - log_term, 1e-6, None))
+
+
+def _equivalent_potential_temperature(
+    pressure_hpa: np.ndarray, temperature_c: np.ndarray, dewpoint_c: np.ndarray
+) -> np.ndarray:
+    temp_k = np.asarray(temperature_c, dtype=float32) + 273.15
+    pres = np.asarray(pressure_hpa, dtype=float32)
+    dew_c = np.asarray(dewpoint_c, dtype=float32)
+
+    r = _mixing_ratio_from_dewpoint(pres, dew_c)
+    tlcl_c, _ = lcl_temperature_pressure(pres, temperature_c, dew_c)
+    tlcl_k = tlcl_c + 273.15
+
+    with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
+        theta_l = temp_k * np.power(1000.0 / pres, (RD / CP) * (1.0 - 0.28 * r))
+        exp_term = np.exp(((3036.0 / tlcl_k) - 1.78) * r * (1.0 + 0.448 * r))
+        return theta_l * exp_term
+
+
+def most_unstable_parcel_source(
+    pressure_hpa: np.ndarray, temperature_c: np.ndarray, dewpoint_c: np.ndarray, depth_hpa: float = 300.0
+) -> tuple[float, float, float]:
+    '''
+    Return (pressure, temperature, dewpoint) for the most unstable parcel within ``depth_hpa`` of the surface.
+    '''
+
+    pres = np.asarray(pressure_hpa, dtype=float32)
+    temp_c = np.asarray(temperature_c, dtype=float32)
+    dew_c = np.asarray(dewpoint_c, dtype=float32)
+
+    valid = np.isfinite(pres) & np.isfinite(temp_c) & np.isfinite(dew_c)
+    if valid.sum() < 1:
+        return np.nan, np.nan, np.nan
+
+    order = np.argsort(pres)[::-1]
+    pres_sorted = pres[order]
+    temp_sorted = temp_c[order]
+    dew_sorted = dew_c[order]
+
+    surface_p = pres_sorted[0]
+    layer_mask = pres_sorted >= (surface_p - depth_hpa)
+    theta_e = _equivalent_potential_temperature(
+        pres_sorted[layer_mask], temp_sorted[layer_mask], dew_sorted[layer_mask]
+    )
+    if not np.isfinite(theta_e).any():
+        return np.nan, np.nan, np.nan
+
+    idx = int(np.nanargmax(theta_e))
+    start_p = float(pres_sorted[layer_mask][idx])
+    start_temp = float(temp_sorted[layer_mask][idx])
+    start_dew = float(dew_sorted[layer_mask][idx])
+    return start_p, start_temp, start_dew
+
+
+def mixed_layer_parcel_source(
+    pressure_hpa: np.ndarray, temperature_c: np.ndarray, dewpoint_c: np.ndarray, depth_hpa: float = 100.0
+) -> tuple[float, float, float]:
+    '''
+    Return (pressure, temperature, dewpoint) for a mixed-layer parcel averaged over ``depth_hpa``.
+    '''
+
+    pres = np.asarray(pressure_hpa, dtype=float32)
+    temp_c = np.asarray(temperature_c, dtype=float32)
+    dew_c = np.asarray(dewpoint_c, dtype=float32)
+
+    valid = np.isfinite(pres) & np.isfinite(temp_c) & np.isfinite(dew_c)
+    if valid.sum() < 1:
+        return np.nan, np.nan, np.nan
+
+    order = np.argsort(pres)[::-1]
+    pres_sorted = pres[order]
+    temp_sorted = temp_c[order]
+    dew_sorted = dew_c[order]
+
+    surface_p = pres_sorted[0]
+    layer_mask = pres_sorted >= (surface_p - depth_hpa)
+    if not layer_mask.any():
+        return np.nan, np.nan, np.nan
+
+    mean_temp = float(np.nanmean(temp_sorted[layer_mask]))
+    mean_pres = float(np.nanmean(pres_sorted[layer_mask]))
+    layer_mr = _mixing_ratio_from_dewpoint(pres_sorted[layer_mask], dew_sorted[layer_mask])
+    mean_mr = float(np.nanmean(layer_mr))
+    mean_dew = _dewpoint_from_mixing_ratio(mean_mr, mean_pres)
+    return mean_pres, mean_temp, mean_dew
+
+
+def parcel_cape_cinh_from_profile(
+    pressure_hpa: np.ndarray,
+    temperature_c: np.ndarray,
+    dewpoint_c: np.ndarray,
+    height_m: np.ndarray,
+    *,
+    start_pressure_hpa: float | None = None,
+    start_temperature_c: float | None = None,
+    start_dewpoint_c: float | None = None,
+    presorted: bool = False,
+) -> tuple[float, float]:
+    '''
+    CAPE and CINH (J/kg) for a parcel starting at the specified thermodynamic point.
+    '''
+
+    pres = np.asarray(pressure_hpa, dtype=float32)
+    temp_c = np.asarray(temperature_c, dtype=float32)
+    dew_c = np.asarray(dewpoint_c, dtype=float32)
+    hgt = np.asarray(height_m, dtype=float32)
+
+    valid = np.isfinite(pres) & np.isfinite(temp_c) & np.isfinite(dew_c) & np.isfinite(hgt)
+    if valid.sum() < 3:
+        return np.nan, np.nan
+
+    pres = pres[valid]
+    temp_c = temp_c[valid]
+    dew_c = dew_c[valid]
+    hgt = hgt[valid]
+
+    if not presorted:
+        order = np.argsort(pres)[::-1]
+        pres = pres[order]
+        temp_c = temp_c[order]
+        dew_c = dew_c[order]
+        hgt = hgt[order]
+    elif pres[0] < pres[-1]:
+        pres = pres[::-1]
+        temp_c = temp_c[::-1]
+        dew_c = dew_c[::-1]
+        hgt = hgt[::-1]
+
+    vt_env_c = virtual_temperature_profile(pres, temp_c, dew_c)
+    vt_parcel_c = parcel_trace_temperature_profile(
+        pres,
+        temp_c,
+        dew_c,
+        start_pressure_hpa=start_pressure_hpa,
+        start_temperature_c=start_temperature_c,
+        start_dewpoint_c=start_dewpoint_c,
+    )
+
+    valid_vt = np.isfinite(vt_env_c) & np.isfinite(vt_parcel_c) & np.isfinite(hgt)
+    if valid_vt.sum() < 2:
+        return np.nan, np.nan
+
+    pres = pres[valid_vt]
+    vt_env_k = vt_env_c[valid_vt] + 273.15
+    vt_parcel_k = vt_parcel_c[valid_vt] + 273.15
+    hgt = hgt[valid_vt]
+
+    # CAPE/CINH integration assumes a strictly increasing height profile. Some
+    # WRF outputs occasionally carry flat or slightly inverted heights near the
+    # surface (especially over complex terrain) that collapse the layer
+    # thickness to ~0 m and zero-out buoyancy integrals. Normalize the profile to
+    # surface-first pressure order and rebuild a monotonic AGL height using the
+    # hypsometric equation so buoyancy integrates over realistic layer depths.
+    order = np.argsort(pres)[::-1]
+    pres = pres[order]
+    vt_env_k = vt_env_k[order]
+    vt_parcel_k = vt_parcel_k[order]
+    hgt = hgt[order]
+
+    hgt_sorted = hgt
+    hgt_agl = hgt_sorted - float(hgt_sorted[0])
+
+    if np.any(np.diff(hgt_agl) <= 0.0):
+        # Guard against inverted or flat terrain/level geometry by rebuilding a
+        # monotonic height structure from the hypsometric equation. Anchor the
+        # synthetic profile at the surface so the parcel still lifts through a
+        # realistic depth even when raw model heights are noisy.
+        hgt_agl = np.zeros_like(pres, dtype=float32)
+        for idx in range(1, pres.size):
+            tv_bar = 0.5 * (vt_env_k[idx - 1] + vt_env_k[idx])
+            dp_ratio = np.log(np.clip(pres[idx - 1] / pres[idx], 1e-6, None))
+            hgt_agl[idx] = hgt_agl[idx - 1] + (RD / G0) * tv_bar * dp_ratio
+
+    hgt = hgt_agl
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        buoyancy = G0 * (vt_parcel_k - vt_env_k) / np.clip(vt_env_k, 1e-6, None)
+
+    buoyancy = np.asarray(buoyancy, dtype=float32)
+    if not np.isfinite(buoyancy).any():
+        return np.nan, np.nan
+
+    # Locate the first level of positive buoyancy (LFC) to bound CINH to the
+    # layer the parcel must lift through. If no positive buoyancy exists, CAPE
+    # is zero and CINH is simply the integrated negative buoyancy of the
+    # profile.
+    positive_idx = np.where(buoyancy > 0.0)[0]
+    if positive_idx.size == 0:
+        # No positive buoyancy means the parcel never becomes unstable. Treat the
+        # profile as zero CAPE/zero CINH instead of letting deep cold layers
+        # integrate large negative buoyancy.
+        return 0.0, 0.0
+
+    lfc_idx = int(positive_idx[0])
+    lfc_height = hgt[lfc_idx]
+    if lfc_idx > 0 and buoyancy[lfc_idx - 1] < 0.0:
+        frac = -buoyancy[lfc_idx - 1] / np.clip(
+            buoyancy[lfc_idx] - buoyancy[lfc_idx - 1], 1e-6, None
+        )
+        lfc_height = hgt[lfc_idx - 1] + frac * (hgt[lfc_idx] - hgt[lfc_idx - 1])
+
+    # The equilibrium level is the level above the last positive buoyancy where
+    # the parcel returns to neutral or negative and does not become unstable
+    # again. This guards against choosing a shallow negative blip as the EL when
+    # the parcel quickly re-enters a buoyant layer aloft.
+    pos_after_lfc = np.where((np.arange(buoyancy.size) >= lfc_idx) & (buoyancy > 0.0))[0]
+    last_pos_idx = int(pos_after_lfc[-1])
+
+    el_candidates = np.where((np.arange(buoyancy.size) > last_pos_idx) & (buoyancy <= 0.0))[0]
+    if el_candidates.size:
+        el_idx = int(el_candidates[0])
+        el_height = hgt[el_idx]
+        if buoyancy[el_idx] < 0.0 and buoyancy[last_pos_idx] > 0.0:
+            frac = buoyancy[last_pos_idx] / np.clip(
+                buoyancy[last_pos_idx] - buoyancy[el_idx], 1e-6, None
+            )
+            el_height = hgt[last_pos_idx] + frac * (hgt[el_idx] - hgt[last_pos_idx])
+    else:
+        el_idx = buoyancy.size - 1
+        el_height = hgt[-1]
+
+    cinh_h = np.concatenate([hgt[:lfc_idx], [lfc_height]])
+    cinh_b = np.concatenate([buoyancy[:lfc_idx], [0.0]])
+    cinh = np.trapz(np.clip(cinh_b, None, 0.0), cinh_h)
+
+    cape_h = np.concatenate([[lfc_height], hgt[lfc_idx:el_idx], [el_height]])
+    cape_b = np.concatenate([[0.0], buoyancy[lfc_idx:el_idx], [0.0]])
+    cape = np.trapz(np.clip(cape_b, 0.0, None), cape_h)
+
+    cape = float(np.clip(cape, 0.0, None))
+    cinh = float(cinh)
+
+    if cape <= 1e-3:
+        # When CAPE is effectively zero (e.g., very cold/stable profiles),
+        # suppress CINH so the display does not accumulate large negative
+        # inhibition values.
+        cape = 0.0
+        cinh = 0.0
+
+    return cape, cinh
 
 
 def ptype_rate_offset(rate: np.ndarray | float) -> np.ndarray | float:
