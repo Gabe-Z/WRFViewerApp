@@ -284,18 +284,18 @@ class SoundingWindow(QMainWindow):
             zorder=7,
         )
         self.figure.canvas.draw_idle()
-
+    
     def _plot_dewpoint_profile(self, pressure_hpa: np.ndarray, dewpoint_c: np.ndarray) -> None:
         valid = np.isfinite(pressure_hpa) & np.isfinite(dewpoint_c)
         if valid.sum() < 2:
             return
-
+        
         skewed_temps = sounding_skewed_isotherm(
             dewpoint_c[valid],
             pressure_hpa[valid],
             aspect_correction=getattr(self, '_aspect_correction', 1.0),
         )
-
+        
         self.ax.plot(
             skewed_temps,
             pressure_hpa[valid],
@@ -303,17 +303,17 @@ class SoundingWindow(QMainWindow):
             linewidth=2.0,
             zorder=6,
         )
-
+        
         surface_idx = int(np.nanargmax(pressure_hpa[valid]))
         surface_dewpoint_c = float(dewpoint_c[valid][surface_idx])
-        surface_dewpoint_f = surface_dewpoint_c * 9.0 / 5.0 + 32.0
+        surface_dewpoint_c_f = surface_dewpoint_c * 9.0 / 5.0 + 32.0
         surface_pressure = float(pressure_hpa[valid][surface_idx])
         surface_x = float(skewed_temps[surface_idx])
         label_offset = 0.8
         self.ax.text(
             surface_x - label_offset,
             surface_pressure,
-            f'{surface_dewpoint_f:.1f}°F',
+            f'{surface_dewpoint_c_f:.1f}°F',
             color='lime',
             fontsize=10,
             va='center',

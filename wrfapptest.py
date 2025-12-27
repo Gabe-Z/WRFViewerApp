@@ -353,8 +353,8 @@ class WRFLoader(QtCore.QObject):
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         '''
         Return a single-column temperature/pressure/height profile nearest the lat/lon.
-
-        Also returns dewpoint (°C) computed from the column relative humidity.
+        
+        Also returns dewpoint (C) computed from the column relative humidity.
         '''
         
         lat_grid, lon_grid = self.get_geo(frame)
@@ -380,20 +380,20 @@ class WRFLoader(QtCore.QObject):
             temp_c = temp_c[::-1]
             height_m = height_m[::-1]
             rh = rh[::-1]
-
+        
         pressure_hpa = np.asarray(pressure_pa, dtype=float32) / 100.0
         temp_c = np.asarray(temp_c, dtype=float32)
         rh = np.asarray(rh, dtype=float32)
-
+        
         with np.errstate(divide='ignore', invalid='ignore'):
-            # Magnus formula using relative humidity percent and temperature in Celsius.
+            # Magnus formula using relative humidity percent and temperature in Celcius.
             gamma = np.log(np.clip(rh, 1e-6, 100.0) * 0.01) + (17.67 * temp_c) / (temp_c + 243.5)
             dewpoint_c = (243.5 * gamma) / (17.67 - gamma)
-
+            
         valid = np.isfinite(pressure_hpa) & np.isfinite(temp_c)
         if valid.sum() < 2:
             raise RuntimeError('Sounding column contains insufficient finite data to plot.')
-
+        
         return pressure_hpa[valid], temp_c[valid], height_m[valid], dewpoint_c[valid]
     
     def _total_precip_inches(self, nc: Dataset, frame: WRFFrame) -> np.ndarray:
