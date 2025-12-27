@@ -827,7 +827,7 @@ class WRFLoader(QtCore.QObject):
                 w = np.clip(w, 0.0, 1.0)
                 
                 data2d = r0 + w * (r1 - r0)
-
+                
                 topcol = refl[-1, :, :]
                 data2d = np.where(has, data2d, topcol)
             elif v == 'SBCAPE':
@@ -844,7 +844,7 @@ class WRFLoader(QtCore.QObject):
                     temperature = temperature[::-1, :, :]
                     rh = rh[::-1, :, :]
                     height = height[::-1, :, :]
-
+                
                 temp_k = temperature + 273.15
                 data2d = surface_based_cape(pressure, temp_k, rh, height)
             else:
@@ -945,14 +945,11 @@ class WRFViewer(QMainWindow):
                 {'label': 'Total Snowfall (10:1)', 'canonical': 'SNOW10'},
             ],
             'Severe Weather': [
+                {'label': 'Instability', 'canonical': None, 'is_divider': True},
+                {'label': 'Surface-Based CAPE', 'canonical': 'SBCAPE'},
                 {'label': 'Excplicit Convective Products', 'canonical': None, 'is_divider': True},
                 {'label': 'Composite Reflectivity', 'canonical': 'MDBZ'},
                 {'label': 'Reflectivity 1km', 'canonical': 'REFL1KM'},
-                {'label': 'Instability', 'canonical': None, 'is_divider': True},
-                {
-                    'label': 'Surface Based Convective Available Potential Energy',
-                    'canonical': 'SBCAPE',
-                },
             ],
             'Upper Air: Height, Wind, Temperature': [
                 {'label': 'Height and Wind', 'canonical': None, 'is_divider': True},
@@ -980,9 +977,9 @@ class WRFViewer(QMainWindow):
             if entry.get('canonical')
         }:
             self._var_aliases.setdefault(canonical.upper(), canonical.upper())
-
+        
         self._var_aliases.setdefault('SURFACE-BASED CAPE', 'SBCAPE')
-
+        
         
         # --- Status Bar Progress (inline) ---
         self.status = QtWidgets.QStatusBar()
@@ -1227,15 +1224,15 @@ class WRFViewer(QMainWindow):
         
         idx = min(max(0, self.sld_time.value()), len(self.loader.frames) - 1)
         frame = self.loader.frames[idx]
-
+        
         try:
             pressure_hpa, temp_c, height_m, dewpoint_c = self.loader.get_sounding_profile(frame, lat, lon)
         except Exception as exc:
             QMessageBox.critical(self, 'Sounding failed', str(exc))
             return
-
+        
         sbcape = surface_based_cape_from_profile(pressure_hpa, temp_c, dewpoint_c, height_m)
-
+        
         wnd = SoundingWindow(
             frame.timestamp_str,
             lat,
@@ -1631,7 +1628,7 @@ class WRFViewer(QMainWindow):
             # regardless of the intensity span we use inside each bucket.
             return -0.5, 4.0, 'Precipitation Type (in/hr rates)'
         if v == 'SBCAPE':
-            return 0.0, 10000.0, 'Surface-based CAPE (J kg$^{-1}$)'
+            return 0.0, 10000.0, 'Surface-Based CAPE (J kg$^{-1}$)'
         return None, None, var
     
     def _title_text(self, display_var: str, canonical_var: str) -> str:
@@ -1654,7 +1651,7 @@ class WRFViewer(QMainWindow):
         if v == 'TD2F':
             return '2 m Dewpoint (°F)'
         if v == 'SBCAPE':
-            return 'Surface-based CAPE (J kg$^{-1}$)'
+            return 'Surface-Based CAPE (J kg$^{-1}$)'
         return display_var
     
     def _precip_type_style(self) -> tuple[ListedColormap, BoundaryNorm, list[int], list[str]]:
