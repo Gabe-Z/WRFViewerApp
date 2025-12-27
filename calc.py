@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from matplotlib.transforms import Affine2D
 from netCDF4 import Dataset
 from numpy import float32
 from wrf import interplevel, rh
@@ -257,3 +258,79 @@ def snowfall_support(temp_c: np.ndarray, ptype_field: np.ndarray) -> np.ndarray:
     support = surface_weight * type_factor * melt_penalty
     support[~np.isfinite(ptype)] = 0.0
     return support.astype(float32)
+
+
+def sounding_temperature_ticks(min_c: float = -50.0, max_c: float = 50.0, step_c: float = 10.0) -> np.ndarray:
+    '''Evenly spaced temperature ticks for Skew-T backgrounds (°C).'''
+
+    return np.arange(min_c, max_c + step_c, step_c, dtype=float32)
+
+
+def sounding_isotherm_temperatures(
+    min_c: float = -100.0, max_c: float = 50.0, step_c: float = 10.0
+) -> np.ndarray:
+    '''Temperature values used to draw skewed isotherm guidelines (°C).'''
+
+    return np.arange(min_c, max_c + step_c, step_c, dtype=float32)
+
+
+def sounding_temperature_bounds() -> tuple[float, float]:
+    '''X-axis limits for Skew-T temperature (°C).'''
+
+    temps = sounding_temperature_ticks()
+    return float(temps.min(initial=-50.0)), float(temps.max(initial=50.0))
+
+
+def sounding_pressure_levels() -> np.ndarray:
+    '''Major pressure levels for Skew-T backgrounds (hPa).'''
+
+    return np.array([1050.0, 1000.0, 850.0, 700.0, 500.0, 300.0, 200.0, 100.0], dtype=float32)
+
+
+def sounding_pressure_bounds() -> tuple[float, float]:
+    '''Y-axis limits for Skew-T pressure (hPa).'''
+
+    levels = sounding_pressure_levels()
+    return float(levels.max(initial=1050.0)), float(levels.min(initial=100.0))
+
+
+def sounding_pressure_line_bounds() -> np.ndarray:
+    '''Pressure extent for drawing skewed temperature guidelines (hPa).'''
+
+    bottom, top = sounding_pressure_bounds()
+    return np.array([bottom, top], dtype=float32)
+
+
+def sounding_skew_transform(angle_deg: float = 45.0) -> Affine2D:
+    '''Affine transform that skews temperature lines for Skew-T plots.'''
+
+    return Affine2D().skew_deg(angle_deg, 0.0)
+
+
+def sounding_skewed_isotherm(
+    temp_c: float,
+    pressures: np.ndarray,
+    angle_deg: float = 45.0,
+    aspect_correction: float = 1.0,
+) -> np.ndarray:
+    '''Return x-values for a skewed isotherm across the provided pressures.
+
+    ``aspect_correction`` is a multiplicative factor to account for the current
+    axes pixel aspect (height / width). This keeps the drawn isotherms visible
+    even when the plot is wider than it is tall, preventing the warm lines from
+    running off the chart.
+    '''
+
+    temp_min, temp_max = sounding_temperature_bounds()
+    bottom, top = sounding_pressure_bounds()
+    span = bottom - top
+    if span == 0:
+        return np.full_like(pressures, temp_c, dtype=float32)
+
+    # Anchor each line at its un-skewed temperature at the bottom of the
+    # sounding and skew upward. This keeps the warm guidelines visible near the
+    # surface while still projecting them to the right aloft.
+    skew_per_hpa = np.tan(np.deg2rad(angle_deg)) * aspect_correction
+    scale = (temp_max - temp_min) / span
+    offsets = (bottom - pressures) * skew_per_hpa * scale
+    return np.asarray(temp_c + offsets, dtype=float32)
