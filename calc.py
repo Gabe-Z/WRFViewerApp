@@ -703,25 +703,25 @@ def destagger(arr: np.ndarray, axis: int) -> np.ndarray:
 
 def uh_minimum_for_spacing(dx_m: float | None, dy_m: float | None) -> float:
     '''
-    Resolution-aware minimum updraft helicity threshold (m^2 s^-2).
-
-    A 3 km grid uses 75 m^2 s^-2 while a 9 km grid uses 25 m^2 s^-2. The
+    Resolution-aware minimum updraft helicity threshold (m^s s^-2).
+    
+    A 3 km grid uses 75 m^s s^-2 while a 9 km grid uses 25 m^s s^-2). The
     threshold scales inversely with grid spacing so coarser domains use a lower
     cutoff. Values default to 75 when grid spacing metadata is unavailable.
     '''
-
+    
     dx_km = np.nan
     if dx_m is not None:
-        dx_km = float(dx_m) / 1000.0
+       dx_km = float(dx_m) / 1000.0
     dy_km = np.nan
     if dy_m is not None:
-        dy_km = float(dy_m) / 1000.0
-
+       dy_km = float(dy_m) / 1000.0
+    
     spacing_km = np.nanmean([v for v in (dx_km, dy_km) if np.isfinite(v)])
     if not np.isfinite(spacing_km) or spacing_km <= 0.0:
         return 75.0
-
-    return float(np.clip(225.0 / spacing_km, 1.0, None))
+    
+    return float(np.clip(75.0 / spacing_km, 1.0, None))
 
 
 def calc_wind_gust_mph(nc: Dataset, time_index: int) -> np.ndarray:
@@ -804,85 +804,85 @@ def calc_updraft_helicity(
     top_m: float = 5000.0,
 ) -> np.ndarray:
     '''
-    Updraft helicity (m^2 s^-2) between ``bottom_m`` and ``top_m`` AGL.
-
+    Updraft helicity (m^s s^-2) between ``bottom_m`` amd ``top_m`` AGL.
+    
     Uses destaggered U/V/W winds on mass levels with geometric height derived
-    from PH/PHB and surface height from HGT. Returns ``NaN`` where inputs are
-    insufficient for the integration.
+    from PH/PHB and surface height from HGT. Returns ``Nan`` where inputs are
+    insufficient for the intergration.
     '''
-
+    
     required = ['U', 'V', 'W', 'PH', 'PHB', 'HGT']
     missing = [name for name in required if name not in nc.variables]
     if missing:
         raise RuntimeError(f'Missing variables for updraft helicity: {", ".join(missing)}')
-
+    
     u_stag = slice_time_var(nc.variables['U'], time_index)
     v_stag = slice_time_var(nc.variables['V'], time_index)
     w_stag = slice_time_var(nc.variables['W'], time_index)
-
+    
     u = destagger(u_stag, axis=-1).astype(float32)
     v = destagger(v_stag, axis=-2).astype(float32)
     w = destagger(w_stag, axis=0).astype(float32)
-
+    
     height = calc_height(nc, time_index)
-
-    hgt_var = nc.variables['HGT']
+    
+    hgt_var  = nc.variables['HGT']
     h_dims = tuple(getattr(hgt_var, 'dimensions', ()))
     if 'Time' in h_dims:
         hgt = np.array(hgt_var[time_index, :, :], dtype=float32)
     else:
         hgt = np.array(hgt_var[:, :], dtype=float32)
-
+    
     z_agl = height - hgt[None, :, :]
-
+    
     vert_depths = [u.shape[0], v.shape[0], w.shape[0], z_agl.shape[0]]
     common_levels = min(vert_depths)
     if common_levels < 2:
-        return np.full_like(z_agl[0], np.nan, dtype=float32)
-
+        return np.full(z_agl[0], np.nan, dtype=float32)
+    
     u = u[:common_levels]
     v = v[:common_levels]
     w = w[:common_levels]
     z_agl = z_agl[:common_levels]
-
+    
     dx = getattr(nc, 'DX', np.nan)
     dy = getattr(nc, 'DY', np.nan)
     spacing_dx = float(dx) if np.isfinite(dx) else np.nan
     spacing_dy = float(dy) if np.isfinite(dy) else np.nan
-
+    
     if not np.isfinite(spacing_dx) or spacing_dx <= 0.0:
         spacing_dx = np.nanmean(np.diff(nc.variables['XLONG'][0, 0, :]))
         spacing_dx = spacing_dx * 111320.0 * np.cos(np.deg2rad(np.nanmean(nc.variables['XLAT'][0, :, :]))) if np.isfinite(spacing_dx) else np.nan
-
+    
     if not np.isfinite(spacing_dy) or spacing_dy <= 0.0:
         spacing_dy = np.nanmean(np.diff(nc.variables['XLAT'][0, :, 0]))
         spacing_dy = spacing_dy * 111320.0 if np.isfinite(spacing_dy) else np.nan
-
+    
     if not np.isfinite(spacing_dx) or spacing_dx <= 0.0:
         spacing_dx = 3000.0
     if not np.isfinite(spacing_dy) or spacing_dy <= 0.0:
         spacing_dy = 3000.0
-
+    
     # Relative vertical vorticity on mass levels.
     dvdx = np.gradient(v, spacing_dx, axis=-1)
     dudy = np.gradient(u, spacing_dy, axis=-2)
     rel_vort = dvdx - dudy
-
-    # Restrict to the requested layer and integrate w * zeta through depth.
+    
+    # Restrict to the requested layer and intergrate w * zeta through depth.
     layer_mask = (z_agl >= bottom_m) & (z_agl <= top_m)
     integrand = np.where(layer_mask, rel_vort * w, np.nan)
     layer_heights = np.where(layer_mask, z_agl, np.nan)
-
+    
     valid_pairs = np.isfinite(integrand[1:]) & np.isfinite(integrand[:-1])
-    valid_pairs &= np.isfinite(layer_heights[1:]) & np.isfinite(layer_heights[:-1])
-
+    valid_pairs &= np.isfinite(layer_heights[1:]) & np.isfinite(layer_mask[:-1])
+    
     delta_h = np.where(valid_pairs, layer_heights[1:] - layer_heights[:-1], 0.0)
     avg_integrand = np.where(valid_pairs, 0.5 * (integrand[1:] + integrand[:-1]), 0.0)
-
+    
     uh = np.sum(avg_integrand * delta_h, axis=0)
     uh = np.where(valid_pairs.any(axis=0), uh, np.nan)
     uh = np.asarray(uh, dtype=float32)
-
+    
     return uh
 
 

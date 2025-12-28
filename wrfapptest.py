@@ -98,7 +98,7 @@ class WRFFrame:
     path: str
     time_index: int
     timestamp_str: str
-    timestamp: datetime | None = None
+    timestamp: datatime | None = None
 
 
 @dataclass(frozen=True)
@@ -136,7 +136,7 @@ class SurfaceWindData:
 
 
 @dataclass
-class ReflectivityUHOverlay:
+class ReflectivityUHOverlays:
     reflectivity: np.ndarray
     uh_max: np.ndarray
     uh_threshold: float
@@ -233,11 +233,11 @@ class WRFLoader(QtCore.QObject):
             slicer[-1] = slice(0, min_x)
             aligned.append(np.asarray(arr[tuple(slicer)]))
         return aligned
-
+    
     @staticmethod
     def _scalar_value(value: T.Any) -> T.Any:
-        """Peel away nested sequences to return the first scalar-like value."""
-
+        ''' Peel away nested sequences to return the first scalar-like value. '''
+        
         seen: set[int] = set()
         cur = value
         while isinstance(cur, (list, tuple, np.ndarray, set)):
@@ -248,7 +248,7 @@ class WRFLoader(QtCore.QObject):
             if ident in seen:
                 break
             seen.add(ident)
-
+            
             try:
                 # Prefer deterministic ordering for sets by sorting stringified entries.
                 if isinstance(cur, set):
@@ -262,14 +262,14 @@ class WRFLoader(QtCore.QObject):
                     cur = cur[0]
             except Exception:
                 break
-
+        
         return cur
-
+    
     @staticmethod
     def _level_key(level_hpa: T.Optional[T.Any]) -> T.Optional[float]:
         if level_hpa is None:
             return None
-
+        
         level_hpa = WRFLoader._scalar_value(level_hpa)
         hashable = WRFLoader._to_hashable(level_hpa)
         # If a sequence of levels was provided, prefer the first finite entry.
@@ -280,26 +280,26 @@ class WRFLoader(QtCore.QObject):
                 except Exception:
                     continue
             return None
-
+        
         try:
             return float(hashable)
         except Exception:
             return None
-
+    
     @staticmethod
     def _var_key(var: T.Any) -> str:
-        """Coerce any variable selector into a stable, hashable string key."""
-
+        ''' Coerce any variable selector into a stable, hashable string key. '''
+        
         var = WRFLoader._scalar_value(var)
         hashable = WRFLoader._to_hashable(var)
         if isinstance(hashable, tuple):
             hashable = '|'.join(str(v) for v in hashable)
         return str(hashable).upper()
-
+    
     @staticmethod
     def _to_hashable(value: T.Any) -> T.Any:
-        """Convert any iterable input into an immutable, hashable structure."""
-
+        ''' Convert any iterable input into an immutable, hashable structure.'''
+        
         if value is None:
             return None
         if isinstance(value, (str, bytes)):
@@ -334,7 +334,7 @@ class WRFLoader(QtCore.QObject):
             return dt.strftime('%Y-%m-%d %H:%M:%S UTC')
         except ValueError:
             return ts
-
+    
     @staticmethod
     def _parse_timestamp(ts: str) -> datetime | None:
         for fmt in ('%Y-%m-%d_%H:%M:%S', '%Y-%m-%d %H:%M:%S'):
@@ -403,12 +403,12 @@ class WRFLoader(QtCore.QObject):
                 lon = to_np(lons)
         self._geo_cache[fp] = (lat, lon)
         return lat, lon
-
+    
     def _uh_threshold(self, frame_path: str) -> float:
         cached = self._uh_threshold_cache.get(frame_path)
         if cached is not None:
             return cached
-
+        
         with Dataset(frame_path) as nc:
             dx = getattr(nc, 'DX', None)
             dy = getattr(nc, 'DY', None)
@@ -724,28 +724,28 @@ class WRFLoader(QtCore.QObject):
             self._cache[snow_key] = accum.astype(float32)
             
         return self._cache[(frame.path, 'SNOW10', frame.time_index)]
-
+    
     def _uh_field(self, frame: WRFFrame) -> np.ndarray:
         key = (frame.path, 'UH2TO5', frame.time_index)
         cached = self._cache.get(key)
         if cached is not None:
             return cached
-
+        
         with Dataset(frame.path) as nc:
             uh = calc_updraft_helicity(nc, frame.time_index)
         self._cache[key] = uh.astype(float32)
         return self._cache[key]
-
+    
     def _uh_max_last_hour(self, target_idx: int) -> np.ndarray:
         frame = self.frames[target_idx]
         key = (frame.path, 'UHMAX1HR', frame.time_index)
         cached = self._cache.get(key)
         if cached is not None:
             return cached
-
+        
         target_time = frame.timestamp
         lower_bound = target_time - timedelta(hours=1) if target_time else None
-
+        
         uh_fields: list[np.ndarray] = []
         for idx in range(target_idx, -1, -1):
             fr = self.frames[idx]
@@ -754,7 +754,7 @@ class WRFLoader(QtCore.QObject):
             uh_fields.append(self._uh_field(fr))
             if lower_bound is None:
                 break
-
+        
         aligned = self._align_xy(*uh_fields)
         finite = [arr for arr in aligned if arr is not None]
         if not finite:
@@ -763,22 +763,22 @@ class WRFLoader(QtCore.QObject):
             stack = np.stack(finite, axis=0)
             with np.errstate(invalid='ignore'):
                 result = np.nanmax(stack, axis=0)
-
+        
         self._cache[key] = result.astype(float32, copy=False)
         return self._cache[key]
-
-    def _reflectivity_with_uh(self, frame: WRFFrame) -> ReflectivityUHOverlay:
+    
+    def _reflectivity_with_uh(self, frame: WRFFrame) -> ReflectivityUHOverlays:
         try:
             target_idx = self.frames.index(frame)
         except ValueError:
             raise RuntimeError('Frame not found for UH overlay calculation.')
-
+        
         mdbz = self.get2d(frame, 'MDBZ')
         uh_max = self._uh_max_last_hour(target_idx)
         threshold = self._uh_threshold(frame.path)
-
+        
         aligned_refl, aligned_uh = self._align_xy(mdbz, uh_max)
-        return ReflectivityUHOverlay(
+        return ReflectivityUHOverlays(
             reflectivity=np.asarray(aligned_refl, dtype=float32),
             uh_max=np.asarray(aligned_uh, dtype=float32),
             uh_threshold=float(threshold),
@@ -829,12 +829,12 @@ class WRFLoader(QtCore.QObject):
         key = (self._var_key(var), self._level_key(level_hpa))
         if key not in self.preloaded:
             self.preloaded[key] = [None] * len(self.frames)
-
+            
     def set_preloaded(self, var: str, level_hpa: T.Optional[float], idx: int, data: T.Any) -> None:
         key = (self._var_key(var), self._level_key(level_hpa))
         self.preloaded.setdefault(key, [None] * len(self.frames))
         self.preloaded[key][idx] = data
-
+    
     def get_preloaded(self, var: str, level_hpa: T.Optional[float], idx: int) -> T.Optional[T.Any]:
         key = (self._var_key(var), self._level_key(level_hpa))
         li = self.preloaded.get(key)
@@ -850,7 +850,7 @@ class WRFLoader(QtCore.QObject):
         key = (frame.path, f'{v}@{lvl_key}', frame.time_index)
         if key in self._cache:
             return self._cache[key]
-
+        
         with Dataset(frame.path) as nc:
             if v in ('MDBZ', 'MAXDBZ'):
                 # Compute MDBZ as column max of reflectivity (no wrf.getvar to avoid pickling)
@@ -1542,18 +1542,18 @@ class WRFViewer(QMainWindow):
         self._last_category_index = None
 
     def _canonical_var(self, var: str | T.Sequence[T.Any]) -> str:
-        """Normalize a label or alias into a canonical variable string."""
-
+        ''' Normalize a label or alias into a canonical variable string.'''
+        
         if var is None:
             return ''
-
+        
         var = WRFLoader._scalar_value(var)
         var = WRFLoader._to_hashable(var)
         if isinstance(var, tuple):
             if len(var) == 0:
                 return ''
             var = var[0]
-
+        
         var_key = str(var).upper()
         return self._var_aliases.get(var_key, var_key)
     
@@ -1650,7 +1650,7 @@ class WRFViewer(QMainWindow):
         display_var: T.Any = self.current_var_label
         while isinstance(display_var, (list, tuple, np.ndarray)):
             if len(display_var) == 0:
-                QMessageBox.critical(self, 'Plot error', 'No variable selected')
+                QMessageBox.critical(self, 'Plot error', 'No variable selected.')
                 return
             display_var = display_var[0]
         display_var = str(display_var)
@@ -1709,7 +1709,7 @@ class WRFViewer(QMainWindow):
         spec = self.upper_air_specs.get(var)
         level = spec.level_hpa if spec else None
         vector_data: T.Optional[SurfaceWindData] = None
-        overlay_obj: T.Optional[ReflectivityUHOverlay] = None
+        overlay_obj: T.Optional[ReflectivityUHOverlays] = None
 
         data_obj = self.loader.get_preloaded(var, level, idx)
         if data_obj is None:
@@ -1738,14 +1738,14 @@ class WRFViewer(QMainWindow):
                 data_obj = self.loader.get_upper_air_data(frame, var)
             data = np.asarray(data_obj.scalar)
         else:
-            overlay_obj = data_obj if isinstance(data_obj, ReflectivityUHOverlay) else None
+            overlay_obj = data_obj if isinstance(data_obj, ReflectivityUHOverlays) else None
             vector_data = data_obj if isinstance(data_obj, SurfaceWindData) else None
             if overlay_obj is not None:
                 data = np.asarray(overlay_obj.reflectivity)
             else:
                 data = np.asarray(data_obj.scalar if isinstance(data_obj, SurfaceWindData) else data_obj)
-
-        overlay_field = np.asarray(overlay_obj.uh_max) if overlay_obj is not None else None
+            
+            overlay_field = np.asarray(overlay_obj.uh_max) if overlay_obj is not None else None
         
         data = np.squeeze(data)
         plot_lat = lat
@@ -1839,12 +1839,12 @@ class WRFViewer(QMainWindow):
             self._draw_surface_barbs(plot_lat, plot_lon, vector_data)
         else:
             self._clear_upper_air_artists()
-
+        
         if overlay_obj is not None:
             self._draw_uh_overlay(plot_lat, plot_lon, overlay_field if overlay_field is not None else np.array([]), overlay_obj.uh_threshold)
         else:
             self._clear_uh_overlay()
-
+        
         self._uh_threshold_text = overlay_obj.uh_threshold if overlay_obj is not None else None
         self.ax.set_title(self._title_text(display_var, var), loc='center', fontsize=12, fontweight='bold')
         self._draw_value_labels(plot_lat, plot_lon, data, var)
@@ -1853,7 +1853,7 @@ class WRFViewer(QMainWindow):
     def _default_range(self, var: str) -> tuple[T.Optional[float], T.Optional[float], str]:
         v = var.upper()
         if v in ('MDBZ', 'MAXDBZ'):
-            return 0.0, 70.0, 'Reflectivity (dBZ)'
+            return 5.0, 70.0, 'Reflectivity (dBZ)'
         if v == 'MDBZ_1HRUH':
             return 5.0, 70.0, 'Reflectivity (dBZ)'
         if v in ('RAINNC', 'RAINC'):
@@ -1869,7 +1869,7 @@ class WRFViewer(QMainWindow):
         if v == 'TD2F':
             return -40.0, 90, '2-m dewpoint (°F)'
         if v == 'REFL1KM':
-            return 0.0, 70.0, 'Reflectivity @ 1km AGL (dBZ)'
+            return 5.0, 70.0, 'Reflectivity @ 1km AGL (dBZ)'
         if v == 'SNOW10':
             return 0.0, 60.0, 'Total Snowfall (in)'
         if v == 'PTYPE':
@@ -2048,7 +2048,7 @@ class WRFViewer(QMainWindow):
                     color='black',
                 )
                 self._value_labels.append(txt)
-
+    
     def _clear_uh_overlay(self) -> None:
         if not self._uh_artists:
             return
@@ -2069,87 +2069,87 @@ class WRFViewer(QMainWindow):
             except Exception:
                 pass
         self._uh_artists.clear()
-
+    
     def _draw_uh_overlay(self, lat: np.ndarray, lon: np.ndarray, uh_field: np.ndarray, threshold: float) -> None:
         self._clear_uh_overlay()
         if uh_field.size == 0:
             return
-
+        
         uh_arr = np.asarray(uh_field)
         mask = np.isfinite(uh_arr) & (uh_arr >= threshold)
         if not np.any(mask):
             return
-
+        
         uh_masked = np.ma.masked_invalid(uh_arr)
         finite_vals = uh_masked.compressed()
         if finite_vals.size == 0:
             return
-
+        
         max_uh = np.nanmax(finite_vals)
         if not np.isfinite(max_uh):
             return
-
+        
         if max_uh <= threshold:
             max_uh = threshold + 1e-6
-
+        
         fill = self.ax.contourf(
             lon,
             lat,
             uh_masked,
             levels=[threshold, max_uh],
             colors=['#8B4513'],
-            alpha=0.35,
+            alpha=0.5,
             transform=ccrs.PlateCarree(),
             zorder=8,
         )
-        halo = self.ax.contour(
+        '''halo = self.ax.contour(
             lon,
             lat,
             uh_masked,
             levels=[threshold],
             colors='white',
-            linewidths=6.5,
+            linewidths=2,
             linestyles='solid',
             transform=ccrs.PlateCarree(),
-            zorder=20,
-        )
+            zorder=20
+        )'''
         outline = self.ax.contour(
             lon,
             lat,
             uh_masked,
             levels=[threshold],
             colors='black',
-            linewidths=3.5,
+            linewidths=1,
             linestyles='solid',
             transform=ccrs.PlateCarree(),
             zorder=21,
         )
-
-        if outline is not None:
+        
+        '''if outline is not None:
             collections = getattr(outline, 'collections', None)
             if collections:
                 for coll in collections:
                     coll.set_path_effects(
                         [
-                            mpatheffects.Stroke(linewidth=1.5, foreground='black'),
+                            mpatheffects.Stroke(linewidth=4.6, foreground='white'),
                             mpatheffects.Normal(),
                         ]
                     )
             elif hasattr(outline, 'set_path_effects'):
                 outline.set_path_effects(
                     [
-                        mpatheffects.Stroke(linewidth=1.5, foreground='black'),
-                        mpatheffects.Normal(),
+                        mpatheffects.Stroke(linewidth=4.6, foreground='white'),
+                            mpatheffects.Normal(),
                     ]
-                )
-
-        if fill is not None:
-            self._uh_artists.append(fill)
-        if halo is not None:
-            self._uh_artists.append(halo)
+                )'''
+        
+        '''if halo is not None:
+            self._uh_artists.append(halo)'''
         if outline is not None:
             self._uh_artists.append(outline)
-                
+        if fill is not None:
+            self._uh_artists.append(fill)
+    
     def _reset_colorbar_ticks(self) -> None:
         if not self._cbar:
             return
