@@ -128,7 +128,7 @@ class SoundingWindow(QMainWindow):
             self._plot_parcel_trace(
                 pressure_profile_hpa, temperature_profile_c, dewpoint_profile_c
             )
-
+            
             mu_p, mu_temp, mu_dew = most_unstable_parcel_source(
                 pressure_profile_hpa, temperature_profile_c, dewpoint_profile_c
             )
@@ -141,8 +141,8 @@ class SoundingWindow(QMainWindow):
                     start_temperature_c=mu_temp,
                     start_dewpoint_c=mu_dew,
                     color='yellow',
+                    zorder=4,
                 )
-        
         if (
             pressure_profile_hpa is not None
             and temperature_profile_c is not None
@@ -256,9 +256,14 @@ class SoundingWindow(QMainWindow):
         el: float,
         unstable: bool,
     ) -> None:
-        label_widget = QLabel(label)
-        label_widget.setStyleSheet('color: white; font-size: 13px; font-weight: 600;')
-        label_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
+        if label == 'MU':
+            label_widget = QLabel(label)
+            label_widget.setStyleSheet('color: yellow; font-size: 13px; font-weight: 600;')
+            label_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
+        else:
+            label_widget = QLabel(label)
+            label_widget.setStyleSheet('color: white; font-size: 13px; font-weight: 600;')
+            label_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
         
         cape_widget = QLabel(self._format_parcel_value(cape))
         cape_widget.setStyleSheet(f'color: {self._cape_color(cape)}; font-size: 13px;')
@@ -412,9 +417,6 @@ class SoundingWindow(QMainWindow):
             text_transform = self.ax.transData + transforms.ScaledTranslation(
                 0.0, y_offset, self.figure.dpi_scale_trans
             )
-            print(f'label: {label}')
-            print(f'pressure: {pressure_hpa}')
-            print('')
             self.ax.plot(
                 [x_center - half_width, x_center + half_width],
                 [pressure_hpa, pressure_hpa],
@@ -657,6 +659,7 @@ class SoundingWindow(QMainWindow):
         start_temperature_c: float | None = None,
         start_dewpoint_c: float | None = None,
         color: str = '#a0a0a0',
+        zorder: int = 5,
     ) -> None:
         parcel_temp_c = parcel_trace_temperature_profile(
             pressure_hpa,
@@ -683,6 +686,6 @@ class SoundingWindow(QMainWindow):
             color=color,
             linestyle='--',
             linewidth=1.8,
-            zorder=5,
+            zorder=zorder,
         )
         self.figure.canvas.draw_idle()
