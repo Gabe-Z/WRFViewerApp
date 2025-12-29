@@ -218,17 +218,17 @@ class SoundingWindow(QMainWindow):
         if not np.isfinite(value):
             return 'N/A'
         return f'{value:.0f} J/kg'
-
+    
     def _format_height_value(self, unstable: bool, value: float) -> str:
         if not unstable or not np.isfinite(value):
             return 'N/A'
         return f'{value:.0f}'
-
+    
     def _format_lifted_index(self, unstable: bool, value: float) -> str:
         if not unstable or not np.isfinite(value):
             return 'N/A'
         return f'{value:.1f}'
-
+    
     def _add_parcel_row(
         self,
         grid: QVBoxLayout | QGridLayout,
@@ -245,31 +245,31 @@ class SoundingWindow(QMainWindow):
         label_widget = QLabel(label)
         label_widget.setStyleSheet('color: white; font-size: 13px; font-weight: 600;')
         label_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-
+        
         cape_widget = QLabel(self._format_parcel_value(cape))
         cape_widget.setStyleSheet(f'color: {self._cape_color(cape)}; font-size: 13px;')
         cape_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-
+        
         cinh_widget = QLabel(self._format_parcel_value(cinh))
         cinh_widget.setStyleSheet(f'color: {self._cinh_color(cinh)}; font-size: 13px;')
         cinh_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-
+        
         lcl_widget = QLabel(self._format_height_value(unstable, lcl))
-        lcl_widget.setStyleSheet('color: white; font-size: 13px;')
+        lcl_widget.setStyleSheet(f'color: white; font-size: 13px;')
         lcl_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-
+        
         lfc_widget = QLabel(self._format_height_value(unstable, lfc))
-        lfc_widget.setStyleSheet('color: white; font-size: 13px;')
+        lfc_widget.setStyleSheet(f'color: white; font-size: 13px;')
         lfc_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-
+        
         li_widget = QLabel(self._format_lifted_index(unstable, li))
-        li_widget.setStyleSheet('color: white; font-size: 13px;')
+        li_widget.setStyleSheet(f'color: white; font-size: 13px;')
         li_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-
+        
         el_widget = QLabel(self._format_height_value(unstable, el))
-        el_widget.setStyleSheet('color: white; font-size: 13px;')
+        el_widget.setStyleSheet(f'color: white; font-size: 13px;')
         el_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-
+        
         grid.addWidget(label_widget, row_index, 0)
         grid.addWidget(cape_widget, row_index, 1)
         grid.addWidget(cinh_widget, row_index, 2)
@@ -277,7 +277,7 @@ class SoundingWindow(QMainWindow):
         grid.addWidget(lfc_widget, row_index, 4)
         grid.addWidget(li_widget, row_index, 5)
         grid.addWidget(el_widget, row_index, 6)
-
+    
     def _add_parcel_indices_section(
         self,
         pressure_hpa: np.ndarray,
@@ -298,17 +298,17 @@ class SoundingWindow(QMainWindow):
         section.setColumnStretch(4, 1)
         section.setColumnStretch(5, 1)
         section.setColumnStretch(6, 1)
-
+        
         for col, text in enumerate(('Parcel', 'CAPE', 'CINH', 'LCL', 'LFC', 'LI', 'EL')):
             lbl = QLabel(text)
             lbl.setStyleSheet('color: white; font-size: 13px; font-weight: 700;')
             lbl.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
             section.addWidget(lbl, 0, col)
-
+        
         sb_cape, sb_cinh, sb_lcl, sb_lfc, sb_el, sb_li = parcel_thermo_indices_from_profile(
             pressure_hpa, temperature_c, dewpoint_c, height_m
         )
-
+        
         mu_p, mu_temp, mu_dew = most_unstable_parcel_source(
             pressure_hpa, temperature_c, dewpoint_c
         )
@@ -321,7 +321,7 @@ class SoundingWindow(QMainWindow):
             start_temperature_c=mu_temp if np.isfinite(mu_temp) else None,
             start_dewpoint_c=mu_dew if np.isfinite(mu_dew) else None,
         )
-
+        
         ml_p, ml_temp, ml_dew = mixed_layer_parcel_source(
             pressure_hpa, temperature_c, dewpoint_c
         )
@@ -334,11 +334,11 @@ class SoundingWindow(QMainWindow):
             start_temperature_c=ml_temp if np.isfinite(ml_temp) else None,
             start_dewpoint_c=ml_dew if np.isfinite(ml_dew) else None,
         )
-
+        
         unstable = any(
             np.isfinite(val) and val > 10.0 for val in (sb_cape, mu_cape, ml_cape)
         )
-
+        
         self._add_parcel_row(
             section, 1, 'SFC', sb_cape, sb_cinh, sb_lcl, sb_lfc, sb_li, sb_el, unstable
         )
@@ -348,10 +348,10 @@ class SoundingWindow(QMainWindow):
         self._add_parcel_row(
             section, 3, 'ML', ml_cape, ml_cinh, ml_lcl, ml_lfc, ml_li, ml_el, unstable
         )
-
+        
         if unstable:
             self._add_parcel_level_markers(sb_lcl, sb_lfc, sb_el)
-
+        
         # Align the parcel indices with the Skew-T's y-axis by offsetting the
         # widget by the axes' left position within the canvas.
         self.canvas.draw()
@@ -366,7 +366,7 @@ class SoundingWindow(QMainWindow):
         row.addStretch(1)
         
         self.centralWidget().layout().addLayout(row)
-
+    
     def _pressure_from_height(self, height_m: float) -> float:
         converter = getattr(self, '_pressure_from_profile', None)
         if converter is not None:
@@ -374,20 +374,20 @@ class SoundingWindow(QMainWindow):
             if np.isfinite(pressure):
                 return pressure
         return _standard_atmosphere_pressure(height_m)
-
+    
     def _add_parcel_level_markers(
         self, lcl_height_m: float, lfc_height_m: float, el_height_m: float
     ) -> None:
         level_info = (
             ('LCL', lcl_height_m, 'green', 'top'),
-            ('LFC', lfc_height_m, 'purple', 'bottom'),
-            ('EL', el_height_m, 'white', 'top'),
+            ('LFC', lfc_height_m, 'yellow', 'bottom'),
+            ('EL', el_height_m, 'purple', 'bottom'),
         )
-
+        
         x_center = 40.0
         half_width = 0.8
         offset_px = 6.0 / self.figure.dpi
-
+        
         for label, height_m, color, valign in level_info:
             if not np.isfinite(height_m):
                 continue
@@ -398,6 +398,9 @@ class SoundingWindow(QMainWindow):
             text_transform = self.ax.transData + transforms.ScaledTranslation(
                 0.0, y_offset, self.figure.dpi_scale_trans
             )
+            print(f'label: {label}')
+            print(f'pressure: {pressure_hpa}')
+            print('')
             self.ax.plot(
                 [x_center - half_width, x_center + half_width],
                 [pressure_hpa, pressure_hpa],
@@ -423,9 +426,9 @@ class SoundingWindow(QMainWindow):
                 },
                 zorder=8,
             )
-
-        self.figure.canvas.draw_idle()
         
+        self.figure.canvas.draw_idle()
+    
     def _add_height_markers(self) -> None:
         height_km_levels = [0, 1, 3, 6, 9, 12, 15]
         transform = transforms.blended_transform_factory(
@@ -474,9 +477,9 @@ class SoundingWindow(QMainWindow):
                             right=np.nan,
                         )
                     )
-
+                
                 self._pressure_from_profile = pressure_from_profile
-
+        
         for height_km in height_km_levels:
             height_m = height_km * 1000.0
             pressure_hpa = (
