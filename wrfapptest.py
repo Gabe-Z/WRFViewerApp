@@ -1116,11 +1116,26 @@ class WRFViewer(QMainWindow):
         
         # --- App Settings ---
         self.settings = QtCore.QSettings('WRFViewer1', 'WRFViewer')
-        self.user_cmap_dir = Path.home() / '.wrfviewer' / 'colormaps'
-        self.project_cmap_dir = Path.cwd() / 'colormaps'
+        self.user_cmap_dir = Path.cwd() / 'Colortable'
+        self.project_cmap_dir = self.user_cmap_dir
         for d in (self.user_cmap_dir, self.project_cmap_dir):
             d.mkdir(parents=True, exist_ok=True)
         self.cmap_registry: dict[str, LinearSegmentedColormap] = {}
+        self._var_cmap_lookup: dict[str, str] = {
+            'MDBZ': 'Reflectivity',
+            'MAXDBZ': 'Reflectivity',
+            'MDBZ_1HRUH': 'Reflectivity',
+            'REFL1KM': 'Reflectivity',
+            'GUST': 'Wind_Gust',
+            'WSPD10': 'Wind_Gust',
+            'RH2WIND10KT': 'Relative-humidity',
+            'RH700': 'Relative-humidity',
+            'T2F': 'Temperature',
+            'TEMP850': 'Temperature',
+            'TD2F': 'Dewpoint',
+            'SNOW10': 'Snowfall',
+            'SBCAPE': 'Cape',
+        }
         
         # --- Central ---
         central = QWidget(self)
@@ -1483,6 +1498,7 @@ class WRFViewer(QMainWindow):
         if not text:
             return
         self.current_var_label = text
+        self._apply_var_colormap(self._canonical_var(text))
         self.loader.clear_preloaded()
         self._sync_category_selection(text)
         self.update_plot()
@@ -1556,6 +1572,17 @@ class WRFViewer(QMainWindow):
         
         var_key = str(var).upper()
         return self._var_aliases.get(var_key, var_key)
+
+    def _apply_var_colormap(self, canonical_var: str) -> None:
+        name = self._var_cmap_lookup.get(canonical_var.upper(), 'Jet')
+        cmap = self.cmap_registry.get(name)
+        if cmap is None:
+            return
+
+        self.cmb_cmap.blockSignals(True)
+        self.cmb_cmap.setCurrentText(name)
+        self.cmb_cmap.blockSignals(False)
+        self.on_cmap_changed(name)
     
     def on_toggle_play(self, checked: bool):
         if checked:
@@ -1604,7 +1631,7 @@ class WRFViewer(QMainWindow):
     
     def on_load_cpt(self):
         start_dir = str(self.user_cmap_dir if self.user_cmap_dir.exists() else Path.cwd())
-        path, _ = QFileDialog.getOpenFileName(self, 'Load CPT colormap', os.getcwd(), 'CPT (*.ct *.cpt);;All files (*)')
+        path, _ = QFileDialog.getOpenFileName(self, 'Load CPT colormap', start_dir, 'CPT (*.ct *.cpt);;All files (*)')
         if not path:
             return
         try:
@@ -1706,6 +1733,7 @@ class WRFViewer(QMainWindow):
         
         display_var = self.current_var_label
         var = self.loader._var_key(self._canonical_var(display_var))
+        self._apply_var_colormap(var)
         spec = self.upper_air_specs.get(var)
         level = spec.level_hpa if spec else None
         vector_data: T.Optional[SurfaceWindData] = None
