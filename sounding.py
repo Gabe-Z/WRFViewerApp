@@ -128,6 +128,20 @@ class SoundingWindow(QMainWindow):
             self._plot_parcel_trace(
                 pressure_profile_hpa, temperature_profile_c, dewpoint_profile_c
             )
+
+            mu_p, mu_temp, mu_dew = most_unstable_parcel_source(
+                pressure_profile_hpa, temperature_profile_c, dewpoint_profile_c
+            )
+            if np.isfinite(mu_p) and np.isfinite(mu_temp) and np.isfinite(mu_dew):
+                self._plot_parcel_trace(
+                    pressure_profile_hpa,
+                    temperature_profile_c,
+                    dewpoint_profile_c,
+                    start_pressure_hpa=mu_p,
+                    start_temperature_c=mu_temp,
+                    start_dewpoint_c=mu_dew,
+                    color='yellow',
+                )
         
         if (
             pressure_profile_hpa is not None
@@ -634,10 +648,23 @@ class SoundingWindow(QMainWindow):
         self.figure.canvas.draw_idle()
     
     def _plot_parcel_trace(
-        self, pressure_hpa: np.ndarray, temperature_c: np.ndarray, dewpoint_c: np.ndarray
+        self,
+        pressure_hpa: np.ndarray,
+        temperature_c: np.ndarray,
+        dewpoint_c: np.ndarray,
+        *,
+        start_pressure_hpa: float | None = None,
+        start_temperature_c: float | None = None,
+        start_dewpoint_c: float | None = None,
+        color: str = '#a0a0a0',
     ) -> None:
         parcel_temp_c = parcel_trace_temperature_profile(
-            pressure_hpa, temperature_c, dewpoint_c
+            pressure_hpa,
+            temperature_c,
+            dewpoint_c,
+            start_pressure_hpa=start_pressure_hpa,
+            start_temperature_c=start_temperature_c,
+            start_dewpoint_c=start_dewpoint_c,
         )
         
         valid = np.isfinite(pressure_hpa) & np.isfinite(parcel_temp_c)
@@ -653,7 +680,7 @@ class SoundingWindow(QMainWindow):
         self.ax.plot(
             skewed_temps,
             pressure_hpa[valid],
-            color='#a0a0a0',
+            color=color,
             linestyle='--',
             linewidth=1.8,
             zorder=5,
