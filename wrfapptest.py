@@ -1637,15 +1637,15 @@ class WRFViewer(QMainWindow):
     
     def _do_redraw_from_slider(self):
         self.update_plot()
-
+    
     def _format_lat(self, lat: float) -> str:
         hemi = 'N' if lat >= 0 else 'S'
-        return f"{abs(lat):.2f}° {hemi}"
-
+        return f'{abs(lat):.2f}°{hemi}'
+    
     def _format_lon(self, lon: float) -> str:
         hemi = 'E' if lon >= 0 else 'W'
-        return f"{abs(lon):.2f}° {hemi}"
-
+        return f'{abs(lon):.2f}°{hemi}'
+    
     def _units_for_var(self, canonical_var: str, label: str) -> str:
         v = canonical_var.upper()
         unit_lookup = {
@@ -1656,7 +1656,7 @@ class WRFViewer(QMainWindow):
             'RAINC': 'mm',
             'SNOW10': 'in',
             'GUST': 'mph',
-            'WSPD10': 'm s$^{-1}$',
+            'WSPD10': 'm s$^2{-1}$',
             'RH2WIND10KT': '%',
             'T2F': '°F',
             'TD2F': '°F',
@@ -1666,20 +1666,20 @@ class WRFViewer(QMainWindow):
         }
         if v in unit_lookup:
             return unit_lookup[v]
-
+        
         if v in self.upper_air_specs:
             label = self.upper_air_specs[v].colorbar_label
-
+        
         start = label.rfind('(')
         end = label.rfind(')')
         if 0 <= start < end:
             return label[start + 1 : end].strip()
         return ''
-
+    
     def _format_value(self, value: float, canonical_var: str, units: str) -> str:
         if not np.isfinite(value):
             return 'No data'
-
+        
         v = canonical_var.upper()
         if v == 'PTYPE':
             base = int(np.clip(np.floor(value + 1e-6), 0, 3))
@@ -1688,13 +1688,13 @@ class WRFViewer(QMainWindow):
             rate = value - base
             rate_inhr = (rate / PTYPE_INTENSITY_SPAN) * PTYPE_MAX_RATE_INHR
             if rate_inhr > 0.0:
-                return f"{name} ({rate_inhr:.2f} in/hr)"
+                return f'{name} ({rate_inhr:.2f} in/hr)'
             return name
-
+        
         fmt = '{:.2f}' if abs(value) < 10 else '{:.1f}' if abs(value) < 100 else '{:.0f}'
         val_txt = fmt.format(value)
-        return f"{val_txt} {units}".strip()
-
+        return f'{val_txt} {units}'.strip()
+    
     def _update_hover(self, event: matplotlib.backend_bases.MouseEvent):
         if not self._hover_info:
             return
@@ -1706,23 +1706,23 @@ class WRFViewer(QMainWindow):
             self._hover_annotation.set_visible(False)
             self.canvas.draw_idle()
             return
-
+        
         lat = self._hover_info.get('lat')
         lon = self._hover_info.get('lon')
         data = self._hover_info.get('data')
-        canonical = self._hover_info.get('canonical', '')
+        canonical = self._hover_info.get('canonical')
         label = self._hover_info.get('label', '')
         units = self._hover_info.get('units', '')
-
+        
         if lat is None or lon is None or data is None:
             return
-
+        
         lat_arr = np.asarray(lat)
         lon_arr = np.asarray(lon)
         data_arr = np.asarray(data)
         if lat_arr.shape != lon_arr.shape or lat_arr.shape != data_arr.shape:
             return
-
+        
         dy = lat_arr - event.ydata
         dx = lon_arr - event.xdata
         dist2 = dx * dx + dy * dy
@@ -1732,7 +1732,7 @@ class WRFViewer(QMainWindow):
             self._hover_annotation.set_visible(False)
             self.canvas.draw_idle()
             return
-
+        
         flat_lat = lat_arr.ravel()[idx]
         flat_lon = lon_arr.ravel()[idx]
         flat_val = data_arr.ravel()[idx]
@@ -1740,8 +1740,8 @@ class WRFViewer(QMainWindow):
             self._hover_annotation.set_visible(False)
             self.canvas.draw_idle()
             return
-
-        coord_text = f"{self._format_lat(flat_lat)}  {self._format_lon(flat_lon)}"
+        
+        coord_text = f'{self._format_lat(flat_lat)} {self._format_lon(flat_lon)}'
         value_text = self._format_value(flat_val, canonical, units)
         header = label or canonical
         lines = [coord_text, value_text]
@@ -1751,7 +1751,7 @@ class WRFViewer(QMainWindow):
         self._hover_annotation.set_text('\n'.join(lines))
         self._hover_annotation.set_visible(True)
         self.canvas.draw_idle()
-
+    
     def on_mouse_move(self, event):
         self._update_hover(event)
     
