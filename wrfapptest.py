@@ -1902,6 +1902,10 @@ class WRFViewer(QMainWindow):
             self.ax.set_extent([xmin - dx, xmax + dx, ymin - dy, ymax + dy], crs=ccrs.PlateCarree())
             self._extent_set = True
         
+        overlay_obj: T.Optional[ReflectivityUHOverlays] = None
+        vector_data: T.Optional[SurfaceWindData] = None
+        overlay_field: T.Optional[np.ndarray] = None
+
         if spec:
             if not isinstance(data_obj, UpperAirData):
                 data_obj = self.loader.get_upper_air_data(frame, var)
