@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import platform
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -62,14 +63,18 @@ class SoundingWindow(QMainWindow):
         temperature_profile_c: np.ndarray  | None = None,
         height_profile_m: np.ndarray | None = None,
         dewpoint_profile_c: np.ndarray | None = None,
+        wind_direction_deg: np.ndarray | None = None,
+        wind_speed_ms: np.ndarray | None = None,
+        frame_timestamp: datetime.datetime | None = None,
         sbcape_jkg: float | None = None,
         parent=None,
     ):
         super().__init__(parent)
-        
+
         self._timestamp = timestamp
         self._latitude = latitude
         self._longitude = longitude
+        self._frame_timestamp = frame_timestamp
         self._window_title_text = (
             f'WRF Gabe Zago Sounding - {timestamp} - {latitude:.4f}, {longitude:.4f}'
         )
@@ -117,6 +122,8 @@ class SoundingWindow(QMainWindow):
         self._temperature_profile_c = temperature_profile_c
         self._height_profile_m = height_profile_m
         self._dewpoint_profile_c = dewpoint_profile_c
+        self._wind_direction_deg = wind_direction_deg
+        self._wind_speed_ms = wind_speed_ms
         self._sbcape_jkg = sbcape_jkg
         
         self._draw_background()
@@ -176,12 +183,17 @@ class SoundingWindow(QMainWindow):
             raise ValueError('Temperature profile is unavailable.')
         if self._dewpoint_profile_c is None:
             raise ValueError('Dewpoint profile is unavailable.')
-        
+        if self._wind_direction_deg is None or self._wind_speed_ms is None:
+            raise ValueError('Wind profile is unavailable.')
+
         computer_name = (platform.node() or 'computer').replace(' ', '_')
-        yymmdd_hhmm = datetime.datetime.now().strftime('%y%m%d/%H%M')
-        yymmdd_hh = datetime.datetime.now().strftime('%y%m%d/%H')
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H_%M_%S')
-        filename = (
+        export_time = self._frame_timestamp or datetime.datetime.now()
+        yymmdd_hhmm = export_time.strftime('%y%m%d/%H%M')
+        yymmdd_hh = export_time.strftime('%y%m%d/%H')
+        timestamp = export_time.strftime('%Y-%m-%d_%H_%M_%S')
+        export_dir = Path.cwd() / 'Sounding Export'
+        export_dir.mkdir(parents=True, exist_ok=True)
+        filename = export_dir / (
             f'WRF_{computer_name}_{self._latitude:.4f}_{self._longitude:.4f}_{timestamp}.txt'
         )
         title_name = (
@@ -201,20 +213,26 @@ class SoundingWindow(QMainWindow):
             len(self._height_profile_m),
             len(self._temperature_profile_c),
             len(self._dewpoint_profile_c),
+            len(self._wind_direction_deg),
+            len(self._wind_speed_ms),
         )
-        
+
         for idx in range(row_count):
             pressure = float(self._pressure_profile_hpa[idx])
             height = float(self._height_profile_m[idx])
             temp = float(self._temperature_profile_c[idx])
             dew = float(self._dewpoint_profile_c[idx])
-            lines.append(f'{pressure:.1f},{height:.1f},{temp:.1f},{dew:.1f},0,0')
-        
+            wdir = float(self._wind_direction_deg[idx])
+            wspd = float(self._wind_speed_ms[idx]) * 1.94384  # convert m/s to knots
+            lines.append(
+                f'{pressure:.1f},{height:.1f},{temp:.1f},{dew:.1f},{wdir:.1f},{wspd:.1f}'
+            )
+
         lines.append('%END%')
-        
+
         with open(filename, 'w', encoding='utf-8') as export_file:
             export_file.write('\n'.join(lines))
-        
+
         QMessageBox.information(
             self,
             'Export Successful',

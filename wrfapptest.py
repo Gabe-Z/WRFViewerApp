@@ -100,7 +100,7 @@ class WRFFrame:
     path: str
     time_index: int
     timestamp_str: str
-    timestamp: datatime | None = None
+    timestamp: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -485,11 +485,12 @@ class WRFLoader(QtCore.QObject):
     
     def get_sounding_profile(
         self, frame: WRFFrame, latitude: float, longitude: float
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         '''
         Return a single-column temperature/pressure/height profile nearest the lat/lon.
-        
-        Also returns dewpoint (C) computed from the column relative humidity.
+
+        Also returns dewpoint (C) computed from the column relative humidity and
+        wind direction/speed derived from the U/V wind components.
         '''
         
         lat_grid, lon_grid = self.get_geo(frame)
@@ -508,37 +509,53 @@ class WRFLoader(QtCore.QObject):
         temp_c = base_fields['temperature'][:, y_idx, x_idx]
         height_m = base_fields['height'][:, y_idx, x_idx]
         rh = base_fields['rh'][:, y_idx, x_idx]
-        
+        u_wind = base_fields['u'][:, y_idx, x_idx]
+        v_wind = base_fields['v'][:, y_idx, x_idx]
+        wspd_ms = base_fields['wspd'][:, y_idx, x_idx]
+
         orient = ensure_pressure_orientation(frame.path, base_fields['pressure'], self._pressure_orientation)
         if orient == 'ascending':
             pressure_pa = pressure_pa[::-1]
             temp_c = temp_c[::-1]
             height_m = height_m[::-1]
             rh = rh[::-1]
-        
+            u_wind = u_wind[::-1]
+            v_wind = v_wind[::-1]
+            wspd_ms = wspd_ms[::-1]
+
         pressure_hpa = np.asarray(pressure_pa, dtype=float32) / 100.0
         temp_c = np.asarray(temp_c, dtype=float32)
         rh = np.asarray(rh, dtype=float32)
-        
+        u_wind = np.asarray(u_wind, dtype=float32)
+        v_wind = np.asarray(v_wind, dtype=float32)
+        wspd_ms = np.asarray(wspd_ms, dtype=float32)
+
         with np.errstate(divide='ignore', invalid='ignore'):
             # Magnus formula using relative humidity percent and temperature in Celcius.
             gamma = np.log(np.clip(rh, 1e-6, 100.0) * 0.01) + (17.67 * temp_c) / (temp_c + 243.5)
             dewpoint_c = (243.5 * gamma) / (17.67 - gamma)
-            
+
+            wdir_deg = (np.degrees(np.arctan2(-u_wind, -v_wind)) + 360.0) % 360.0
+            wspd_ms = np.hypot(u_wind, v_wind)
+
         valid = (
             np.isfinite(pressure_hpa)
             & np.isfinite(temp_c)
             & np.isfinite(height_m)
             & np.isfinite(dewpoint_c)
+            & np.isfinite(wdir_deg)
+            & np.isfinite(wspd_ms)
         )
         if valid.sum() < 3:
             raise RuntimeError('Sounding column contains insufficient finite data to plot.')
-        
+
         return (
             pressure_hpa[valid],
             temp_c[valid],
             height_m[valid],
-            dewpoint_c[valid]
+            dewpoint_c[valid],
+            wdir_deg[valid],
+            wspd_ms[valid]
         )
     
     def _total_precip_inches(self, nc: Dataset, frame: WRFFrame) -> np.ndarray:
@@ -1504,11 +1521,11 @@ class WRFViewer(QMainWindow):
         frame = self.loader.frames[idx]
         
         try:
-            pressure_hpa, temp_c, height_m, dewpoint_c = self.loader.get_sounding_profile(frame, lat, lon)
+            pressure_hpa, temp_c, height_m, dewpoint_c, wdir_deg, wspd_ms = self.loader.get_sounding_profile(frame, lat, lon)
         except Exception as exc:
             QMessageBox.critical(self, 'Sounding failed', str(exc))
             return
-        
+
         sbcape = surface_based_cape_from_profile(pressure_hpa, temp_c, dewpoint_c, height_m)
         
         wnd = SoundingWindow(
@@ -1519,6 +1536,9 @@ class WRFViewer(QMainWindow):
             temperature_profile_c=temp_c,
             height_profile_m=height_m,
             dewpoint_profile_c=dewpoint_c,
+            wind_direction_deg=wdir_deg,
+            wind_speed_ms=wspd_ms,
+            frame_timestamp=frame.timestamp,
             sbcape_jkg=sbcape,
             parent=self,
         )
