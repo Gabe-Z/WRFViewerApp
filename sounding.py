@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import datetime
+import platform
+
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -10,6 +13,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QMainWindow,
     QVBoxLayout,
@@ -63,9 +67,13 @@ class SoundingWindow(QMainWindow):
     ):
         super().__init__(parent)
         
-        self.setWindowTitle(
+        self._timestamp = timestamp
+        self._latitude = latitude
+        self._longitude = longitude
+        self._window_title_text = (
             f'WRF Gabe Zago Sounding - {timestamp} - {latitude:.4f}, {longitude:.4f}'
         )
+        self.setWindowTitle(self._window_title_text)
         self.setWindowState(Qt.WindowFullScreen)
         
         central = QWidget(self)
@@ -76,12 +84,17 @@ class SoundingWindow(QMainWindow):
         
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 12)
-        title_label = QLabel(
-            f'WRF Gabe Zago Sounding - {timestamp} - {latitude:.4f}, {longitude:.4f}'
-        )
+        title_label = QLabel(self._window_title_text)
         title_label.setStyleSheet('color: white; font-size: 18px; font-weight: 600;')
         header.addWidget(title_label)
         header.addStretch(1)
+        
+        btn_export = QPushButton('Export')
+        btn_export.setStyleSheet(
+            'color: black; background-color: white; border: 1px solid white; padding: 6px 14px;'
+        )
+        btn_export.clicked.connect(self._export_sounding)
+        header.addWidget(btn_export)
         
         btn_exit = QPushButton('Exit')
         btn_exit.setStyleSheet(
@@ -152,7 +165,68 @@ class SoundingWindow(QMainWindow):
             self._add_parcel_indices_section(
                 pressure_profile_hpa, temperature_profile_c, dewpoint_profile_c, height_profile_m
             )
+    
+    def _export_sounding(self) -> None:
+        '''try:'''
+        if self._pressure_profile_hpa is None:
+            raise ValueError('Pressure profile is unavailable.')
+        if self._height_profile_m is None:
+            raise ValueError('Height profile is unavailable.')
+        if self._temperature_profile_c is None:
+            raise ValueError('Temperature profile is unavailable.')
+        if self._dewpoint_profile_c is None:
+            raise ValueError('Dewpoint profile is unavailable.')
         
+        computer_name = (platform.node() or 'computer').replace(' ', '_')
+        yymmdd_hhmm = datetime.datetime.now().strftime('%y%m%d/%H%M')
+        yymmdd_hh = datetime.datetime.now().strftime('%y%m%d/%H')
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H_%M_%S')
+        filename = (
+            f'WRF_{computer_name}_{self._latitude:.4f}_{self._longitude:.4f}_{timestamp}.txt'
+        )
+        title_name = (
+            f'{computer_name}-WRF|-|{yymmdd_hhmm}|{self._latitude:.4f},{self._longitude:.4f}| {yymmdd_hh}'
+        )
+        
+        lines = [
+            '%TITLE%',
+            title_name,
+            '   LEVEL       HGHT       TEMP       DWPT       WDIR       WSPD',
+            '-------------------------------------------------------------------',
+            '%RAW%',
+        ]
+        
+        row_count = min(
+            len(self._pressure_profile_hpa),
+            len(self._height_profile_m),
+            len(self._temperature_profile_c),
+            len(self._dewpoint_profile_c),
+        )
+        
+        for idx in range(row_count):
+            pressure = float(self._pressure_profile_hpa[idx])
+            height = float(self._height_profile_m[idx])
+            temp = float(self._temperature_profile_c[idx])
+            dew = float(self._dewpoint_profile_c[idx])
+            lines.append(f'{pressure:.1f},{height:.1f},{temp:.1f},{dew:.1f},0,0')
+        
+        lines.append('%END%')
+        
+        with open(filename, 'w', encoding='utf-8') as export_file:
+            export_file.write('\n'.join(lines))
+        
+        QMessageBox.information(
+            self,
+            'Export Successful',
+            f'Sounding exported to {filename}',
+        )
+        '''except Exception as exc: # pylint: disable=broad-except
+            QMessageBox.critical(
+                self,
+                'Export Failed',
+                f'Could not export sounding: {exc}',
+            )'''
+    
     def _draw_background(self) -> None:
         temp_min, temp_max = sounding_temperature_bounds()
         pressure_bottom, pressure_top = sounding_pressure_bounds()
