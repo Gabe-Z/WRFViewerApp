@@ -70,7 +70,7 @@ class SoundingWindow(QMainWindow):
         parent=None,
     ):
         super().__init__(parent)
-
+        
         self._timestamp = timestamp
         self._latitude = latitude
         self._longitude = longitude
@@ -185,7 +185,7 @@ class SoundingWindow(QMainWindow):
             raise ValueError('Dewpoint profile is unavailable.')
         if self._wind_direction_deg is None or self._wind_speed_ms is None:
             raise ValueError('Wind profile is unavailable.')
-
+        
         computer_name = (platform.node() or 'computer').replace(' ', '_')
         export_time = self._frame_timestamp or datetime.datetime.now()
         yymmdd_hhmm = export_time.strftime('%y%m%d/%H%M')
@@ -203,8 +203,8 @@ class SoundingWindow(QMainWindow):
         lines = [
             '%TITLE%',
             title_name,
-            '   LEVEL       HGHT       TEMP       DWPT       WDIR       WSPD',
-            '-------------------------------------------------------------------',
+            '	LEVEL	HGHT	TEMP	DWPT	WDIR	WSPD',
+            '-------------------------------------------------',
             '%RAW%',
         ]
         
@@ -216,23 +216,23 @@ class SoundingWindow(QMainWindow):
             len(self._wind_direction_deg),
             len(self._wind_speed_ms),
         )
-
+        
         for idx in range(row_count):
             pressure = float(self._pressure_profile_hpa[idx])
             height = float(self._height_profile_m[idx])
             temp = float(self._temperature_profile_c[idx])
             dew = float(self._dewpoint_profile_c[idx])
             wdir = float(self._wind_direction_deg[idx])
-            wspd = float(self._wind_speed_ms[idx]) * 1.94384  # convert m/s to knots
+            wspd = float(self._wind_speed_ms[idx]) * 1.94384 # Convert m/s to knots
             lines.append(
-                f'{pressure:.1f},{height:.1f},{temp:.1f},{dew:.1f},{wdir:.1f},{wspd:.1f}'
+                f'  {pressure:.1f}, {height:.1f},   {temp:.1f}, {dew:.1f},  {wdir:.1f}, {wspd:.1f}'
             )
-
+        
         lines.append('%END%')
-
+        
         with open(filename, 'w', encoding='utf-8') as export_file:
             export_file.write('\n'.join(lines))
-
+        
         QMessageBox.information(
             self,
             'Export Successful',

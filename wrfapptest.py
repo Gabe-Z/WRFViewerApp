@@ -488,7 +488,7 @@ class WRFLoader(QtCore.QObject):
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         '''
         Return a single-column temperature/pressure/height profile nearest the lat/lon.
-
+        
         Also returns dewpoint (C) computed from the column relative humidity and
         wind direction/speed derived from the U/V wind components.
         '''
@@ -512,7 +512,7 @@ class WRFLoader(QtCore.QObject):
         u_wind = base_fields['u'][:, y_idx, x_idx]
         v_wind = base_fields['v'][:, y_idx, x_idx]
         wspd_ms = base_fields['wspd'][:, y_idx, x_idx]
-
+        
         orient = ensure_pressure_orientation(frame.path, base_fields['pressure'], self._pressure_orientation)
         if orient == 'ascending':
             pressure_pa = pressure_pa[::-1]
@@ -522,22 +522,22 @@ class WRFLoader(QtCore.QObject):
             u_wind = u_wind[::-1]
             v_wind = v_wind[::-1]
             wspd_ms = wspd_ms[::-1]
-
+        
         pressure_hpa = np.asarray(pressure_pa, dtype=float32) / 100.0
         temp_c = np.asarray(temp_c, dtype=float32)
         rh = np.asarray(rh, dtype=float32)
         u_wind = np.asarray(u_wind, dtype=float32)
         v_wind = np.asarray(v_wind, dtype=float32)
         wspd_ms = np.asarray(wspd_ms, dtype=float32)
-
+        
         with np.errstate(divide='ignore', invalid='ignore'):
             # Magnus formula using relative humidity percent and temperature in Celcius.
             gamma = np.log(np.clip(rh, 1e-6, 100.0) * 0.01) + (17.67 * temp_c) / (temp_c + 243.5)
             dewpoint_c = (243.5 * gamma) / (17.67 - gamma)
-
+            
             wdir_deg = (np.degrees(np.arctan2(-u_wind, -v_wind)) + 360.0) % 360.0
             wspd_ms = np.hypot(u_wind, v_wind)
-
+            
         valid = (
             np.isfinite(pressure_hpa)
             & np.isfinite(temp_c)
@@ -548,14 +548,14 @@ class WRFLoader(QtCore.QObject):
         )
         if valid.sum() < 3:
             raise RuntimeError('Sounding column contains insufficient finite data to plot.')
-
+        
         return (
             pressure_hpa[valid],
             temp_c[valid],
             height_m[valid],
             dewpoint_c[valid],
             wdir_deg[valid],
-            wspd_ms[valid]
+            wspd_ms[valid],
         )
     
     def _total_precip_inches(self, nc: Dataset, frame: WRFFrame) -> np.ndarray:
@@ -1525,7 +1525,7 @@ class WRFViewer(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, 'Sounding failed', str(exc))
             return
-
+        
         sbcape = surface_based_cape_from_profile(pressure_hpa, temp_c, dewpoint_c, height_m)
         
         wnd = SoundingWindow(
