@@ -612,13 +612,13 @@ class WRFLoader(QtCore.QObject):
         cold_energy = np.sum(np.clip(-temp_c, 0.0, None) * layer_thickness, axis=0)
         surface_temp = temp_c[0, :, :]
         max_temp = temp_c.max(axis=0)
-
+        
         warm_layer_depth = np.sum(np.where(temp_c > 0.0, layer_thickness, 0.0), axis=0)
         near_surface_cold = np.sum(
             np.where(
                 (temp_c < -0.5) & (height <= 2500.0),
                 layer_thickness,
-                0.0,
+                0.0
             ),
             axis=0,
         )
@@ -681,12 +681,12 @@ class WRFLoader(QtCore.QObject):
                 mdbz = np.ascontiguousarray(mdbz[:ny, :nx], dtype=float32)
                 ptype = ptype[:ny, :nx]
             precip_mask = np.isfinite(mdbz) & (mdbz > 0.0)
-            base_class = np.zeros_like(ptype, dtype=np.int8)
+            base_class = np.zeros_like(ptype, dtype=float32)
             base_valid = np.isfinite(ptype)
             base_class[base_valid] = np.floor(ptype[base_valid]).astype(np.int8)
-
+            
             rate_inhr = dbz_to_rate_inhr(mdbz)
-
+            
             # Snowfall rates need a higher reflectivity-to-depth conversion than
             # liquid precipitation. Apply a snow-to-liquid ratio for fully snow
             # columns and a milder boost for mixed cases to bring heavy bands
@@ -696,10 +696,10 @@ class WRFLoader(QtCore.QObject):
             # Keep snowfall enhancements reasonable so heavy bands rarely hit the
             # 5 in/hr cap. A 35-40 dBZ snow band now yields roughly 1.5-3 in/hr
             # instead of spiking to the maximum.
-            conversion[base_class == 1] = 6.0
-            conversion[base_class == 2] = 4.0
-            conversion[base_class == 3] = 1.5
-
+            conversion[base_class == 1] = 4.0
+            conversion[base_class == 2] = 2.0
+            conversion[base_class == 3] = 1.0
+            
             rate_inhr = np.clip(rate_inhr * conversion, 0.0, PTYPE_MAX_RATE_INHR)
             intensity = ptype_rate_offset(rate_inhr).astype(float32)
             ptype = np.where(precip_mask, ptype.astype(float32) + intensity, np.nan)

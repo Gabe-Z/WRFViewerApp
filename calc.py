@@ -674,7 +674,7 @@ def parcel_cape_cinh_from_profile(
 
 def ptype_rate_offset(rate: np.ndarray | float) -> np.ndarray | float:
     '''Map precipitation rate (in/hr) to an intensity offset inside the band.'''
-
+    
     rate_arr = np.asarray(rate, dtype=float32)
     break_rates = PTYPE_RATE_BREAKS_INHR
     break_positions = np.linspace(0.0, 1.0, break_rates.size, dtype=float32) * PTYPE_INTENSITY_SPAN
@@ -687,11 +687,11 @@ def ptype_rate_offset(rate: np.ndarray | float) -> np.ndarray | float:
 
 def ptype_rate_from_offset(offset: np.ndarray | float) -> np.ndarray | float:
     '''Invert ``ptype_rate_offset`` back to an approximate precipitation rate.'''
-
+    
     offset_arr = np.asarray(offset, dtype=float32)
     break_rates = PTYPE_RATE_BREAKS_INHR
     break_positions = np.linspace(0.0, 1.0, break_rates.size, dtype=float32) * PTYPE_INTENSITY_SPAN
-    clamped = np.clip(offset_arr, break_positions[0], break_positions[-1])
+    clamped = np.clip(offset_arr, break_rates[0], break_rates[-1])
     rate = np.interp(clamped, break_positions, break_rates)
     if np.isscalar(offset):
         return float(rate)
@@ -1028,8 +1028,8 @@ def snowfall_support(temp_c: np.ndarray, ptype_field: np.ndarray) -> np.ndarray:
     warm_fraction = np.nanmean(temps > 0.0, axis=0)
     temp_penalty = np.clip((3.0 - np.clip(max_temp_c, 0.0, None)) / 3.0, 0.0, 1.0)
     melt_penalty = np.clip(temp_penalty * (1.0 - 0.5 * warm_fraction), 0.2, 1.0)
-
-    # Surface temperature taper between 32-41 F to retain more marginal snow.
+    
+    # Surface temperature taper between 32-40 F.
     surface_weight = np.clip((41.0 - surf_temp_f) / 5.0, 0.0, 1.0)
     
     valid_ptype = np.isfinite(ptype)
