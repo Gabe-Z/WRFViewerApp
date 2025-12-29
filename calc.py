@@ -15,7 +15,11 @@ LV = 2.5e6 # J/kg
 EPSILON = 0.622
 
 PTYPE_INTENSITY_SPAN = 0.995
-PTYPE_MAX_RATE_INHR = 0.5
+PTYPE_MAX_RATE_INHR = 5.0
+
+PTYPE_RATE_BREAKS_INHR = np.array(
+    [0.0, 0.01, 0.05, 0.25, 0.5, 1.0, 2.5, PTYPE_MAX_RATE_INHR], dtype=float32
+)
 
 
 def _saturation_water_pressure_pa(temp_c: float | np.ndarray) -> np.ndarray:
@@ -670,15 +674,28 @@ def parcel_cape_cinh_from_profile(
 
 def ptype_rate_offset(rate: np.ndarray | float) -> np.ndarray | float:
     '''Map precipitation rate (in/hr) to an intensity offset inside the band.'''
-    
+
     rate_arr = np.asarray(rate, dtype=float32)
-    break_rates = np.array([0.0, 0.01, 0.05, 0.25, PTYPE_MAX_RATE_INHR], dtype=float32)
-    break_positions = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=float32) * PTYPE_INTENSITY_SPAN
+    break_rates = PTYPE_RATE_BREAKS_INHR
+    break_positions = np.linspace(0.0, 1.0, break_rates.size, dtype=float32) * PTYPE_INTENSITY_SPAN
     clamped = np.clip(rate_arr, break_rates[0], break_rates[-1])
     offset = np.interp(clamped, break_rates, break_positions)
     if np.isscalar(rate):
         return float(offset)
     return offset.astype(float32)
+
+
+def ptype_rate_from_offset(offset: np.ndarray | float) -> np.ndarray | float:
+    '''Invert ``ptype_rate_offset`` back to an approximate precipitation rate.'''
+
+    offset_arr = np.asarray(offset, dtype=float32)
+    break_rates = PTYPE_RATE_BREAKS_INHR
+    break_positions = np.linspace(0.0, 1.0, break_rates.size, dtype=float32) * PTYPE_INTENSITY_SPAN
+    clamped = np.clip(offset_arr, break_positions[0], break_positions[-1])
+    rate = np.interp(clamped, break_positions, break_rates)
+    if np.isscalar(offset):
+        return float(rate)
+    return rate.astype(float32)
 
 
 def slice_time_var(var_obj, time_index: int) -> np.ndarray:
@@ -1005,12 +1022,15 @@ def snowfall_support(temp_c: np.ndarray, ptype_field: np.ndarray) -> np.ndarray:
     ptype = ptype[:ny, :nx]
     temps = temps[:ny, :nx]
     
-    # Warm nose aloft can still erode flakes; weight by coldest column signal.
+    # Warm layers aloft erode flakes but allow a modest cushion so light warm noses
+    # do not zero out accumulation support too aggressively.
     max_temp_c = np.nanmax(temps, axis=0)
-    melt_penalty = np.clip((1.5 - max_temp_c) / 1.5, 0.0, 1.0)
-    
-    # Surface temperature taper between 32-40 F.
-    surface_weight = np.clip((40.0 - surf_temp_f) / 4.0, 0.0, 1.0)
+    warm_fraction = np.nanmean(temps > 0.0, axis=0)
+    temp_penalty = np.clip((3.0 - np.clip(max_temp_c, 0.0, None)) / 3.0, 0.0, 1.0)
+    melt_penalty = np.clip(temp_penalty * (1.0 - 0.5 * warm_fraction), 0.2, 1.0)
+
+    # Surface temperature taper between 32-41 F to retain more marginal snow.
+    surface_weight = np.clip((41.0 - surf_temp_f) / 5.0, 0.0, 1.0)
     
     valid_ptype = np.isfinite(ptype)
     base_class = np.zeros_like(ptype, dtype=np.int8)

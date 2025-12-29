@@ -80,7 +80,9 @@ from calc import (
     interp_to_pressure,
     PTYPE_INTENSITY_SPAN,
     PTYPE_MAX_RATE_INHR,
+    PTYPE_RATE_BREAKS_INHR,
     ptype_rate_offset,
+    ptype_rate_from_offset,
     calc_updraft_helicity,
     uh_minimum_for_spacing,
     snowfall_support,
@@ -610,6 +612,20 @@ class WRFLoader(QtCore.QObject):
         cold_energy = np.sum(np.clip(-temp_c, 0.0, None) * layer_thickness, axis=0)
         surface_temp = temp_c[0, :, :]
         max_temp = temp_c.max(axis=0)
+
+        warm_layer_depth = np.sum(np.where(temp_c > 0.0, layer_thickness, 0.0), axis=0)
+        near_surface_cold = np.sum(
+            np.where(
+                (temp_c < -0.5) & (height <= 2500.0),
+                layer_thickness,
+                0.0,
+            ),
+            axis=0,
+        )
+        refreeze_energy = np.sum(
+            np.clip(-temp_c, 0.0, None) * layer_thickness * (height <= 3000.0).astype(float32),
+            axis=0,
+        )
         
         #self._log_debug(f'PTYPE energies: warm_energy shape={warm_energy.shape}, cold_energy shape={cold_energy.shape}, surface_temp shape={surface_temp.shape}, max_temp shape={max_temp.shape}')
         
@@ -624,9 +640,11 @@ class WRFLoader(QtCore.QObject):
         
         sleet_mask = (
             ~snow_mask
-            & (warm_energy > 8.0)
-            & (cold_energy >= warm_energy * 0.55)
-            & (surface_temp <= 0.5)
+            & (warm_energy >= 10.0)
+            & (warm_layer_depth >= 750.0)
+            & (refreeze_energy >= warm_energy * 0.8)
+            & (near_surface_cold >= 500.0)
+            & (surface_temp <= 0.0)
         )
         
         rain_mask = (
@@ -634,9 +652,9 @@ class WRFLoader(QtCore.QObject):
             & ~sleet_mask
             & (
                 strong_surface_warm
-                | (warm_near_surface & (warm_ratio >= 0.5))
-                | (deep_warm & (warm_ratio >= 0.45))
-                | (warm_energy >= cold_energy * 0.5)
+                | (warm_near_surface & (warm_ratio >= 0.55))
+                | (deep_warm & (warm_ratio >= 0.5))
+                | (warm_energy >= cold_energy * 0.65)
             )
         )
         
@@ -663,9 +681,27 @@ class WRFLoader(QtCore.QObject):
                 mdbz = np.ascontiguousarray(mdbz[:ny, :nx], dtype=float32)
                 ptype = ptype[:ny, :nx]
             precip_mask = np.isfinite(mdbz) & (mdbz > 0.0)
+            base_class = np.zeros_like(ptype, dtype=np.int8)
+            base_valid = np.isfinite(ptype)
+            base_class[base_valid] = np.floor(ptype[base_valid]).astype(np.int8)
+
             rate_inhr = dbz_to_rate_inhr(mdbz)
-            rate_inhr = np.clip(rate_inhr, 0.0, PTYPE_MAX_RATE_INHR)
-            intensity = (rate_inhr / PTYPE_MAX_RATE_INHR).astype(float32) * PTYPE_INTENSITY_SPAN
+
+            # Snowfall rates need a higher reflectivity-to-depth conversion than
+            # liquid precipitation. Apply a snow-to-liquid ratio for fully snow
+            # columns and a milder boost for mixed cases to bring heavy bands
+            # (typically 35-40 dBZ) into the 1-2 in/hr snowfall range instead of
+            # the liquid-equivalent ~0.1-0.2 in/hr.
+            conversion = np.ones_like(rate_inhr, dtype=float32)
+            # Keep snowfall enhancements reasonable so heavy bands rarely hit the
+            # 5 in/hr cap. A 35-40 dBZ snow band now yields roughly 1.5-3 in/hr
+            # instead of spiking to the maximum.
+            conversion[base_class == 1] = 6.0
+            conversion[base_class == 2] = 4.0
+            conversion[base_class == 3] = 1.5
+
+            rate_inhr = np.clip(rate_inhr * conversion, 0.0, PTYPE_MAX_RATE_INHR)
+            intensity = ptype_rate_offset(rate_inhr).astype(float32)
             ptype = np.where(precip_mask, ptype.astype(float32) + intensity, np.nan)
         except Exception as exc:
             self._log_debug(f'PTYPE: Unable to apply precipitation mask ({exc})')
@@ -1686,7 +1722,7 @@ class WRFViewer(QMainWindow):
             names = ['Rain', 'Snow', 'Mix', 'Sleet']
             name = names[base] if 0 <= base < len(names) else 'Precip'
             rate = value - base
-            rate_inhr = (rate / PTYPE_INTENSITY_SPAN) * PTYPE_MAX_RATE_INHR
+            rate_inhr = ptype_rate_from_offset(rate)
             if rate_inhr > 0.0:
                 return f'{name} ({rate_inhr:.2f} in/hr)'
             return name
@@ -2120,7 +2156,7 @@ class WRFViewer(QMainWindow):
         # Keep the legend readable by labeling each precipitation type once and
         # showing a handful of rate ticks beneath it. This avoids the cluttered
         # "Type value" repetition that made the previous colorbar hard to read.
-        rate_ticks = [0.0, 0.01, 0.05, 0.25, 0.5]
+        rate_ticks = list(PTYPE_RATE_BREAKS_INHR)
         
         def _offset(rate: float) -> float:
             return float(ptype_rate_offset(rate))
