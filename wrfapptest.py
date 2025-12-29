@@ -2181,13 +2181,28 @@ class WRFViewer(QMainWindow):
     def _reset_colorbar_ticks(self) -> None:
         if not self._cbar:
             return
+        # Restore any tweaks applied by precipitation-type plots so other colorbars
+        # use the standard right-hand tick placement without extra offsets.
+        ax = self._cbar.ax
+        ax.tick_params(axis='y', which='both', labelright=True, labelleft=False, pad=2)
+        ax.yaxis.set_label_position('right')
         locator = mticker.AutoLocator()
         formatter = mticker.ScalarFormatter(useOffset=False)
         formatter.set_powerlimits((-6, 6))
-        self._cbar.ax.yaxis.set_major_locator(locator)
-        self._cbar.ax.yaxis.set_major_formatter(formatter)
-        self._cbar.ax.yaxis.set_minor_locator(mticker.NullLocator())
+        ax.yaxis.set_major_locator(locator)
+        ax.yaxis.set_major_formatter(formatter)
+        ax.yaxis.set_minor_locator(mticker.NullLocator())
         self._cbar.update_ticks()
+
+        # Matplotlib may reuse tick Text instances between colorbars. Reset the
+        # transform for every tick so labels that were nudged for precipitation
+        # type plots don't stay offset when we switch back to continuous scales
+        # like snowfall totals.
+        base_transform = ax.get_yaxis_text2_transform(0)[0]
+        offset_transform = mtransforms.offset_copy(base_transform, fig=ax.figure, x=4, units='points')
+        for lbl in ax.get_yticklabels():
+            lbl.set_transform(offset_transform)
+            lbl.set_horizontalalignment('left')
     
     def _clear_upper_air_artists(self):
         if self._contour_sets:
