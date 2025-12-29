@@ -1905,7 +1905,7 @@ class WRFViewer(QMainWindow):
         overlay_obj: T.Optional[ReflectivityUHOverlays] = None
         vector_data: T.Optional[SurfaceWindData] = None
         overlay_field: T.Optional[np.ndarray] = None
-
+        
         if spec:
             if not isinstance(data_obj, UpperAirData):
                 data_obj = self.loader.get_upper_air_data(frame, var)
