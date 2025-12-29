@@ -1298,6 +1298,7 @@ class WRFViewer(QMainWindow):
         self.canvas = FigureCanvas(self.fig)
         self.toolbar = NavToolbar(self.canvas, self)
         self._click_cid = self.canvas.mpl_connect('button_press_event', self.on_map_click)
+        self._hover_cid = self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
         self._timestamp_text = self.fig.text(
             0.02,
             0.02,
@@ -1399,6 +1400,27 @@ class WRFViewer(QMainWindow):
         self._barb_art = None
         self._value_labels: list[matplotlib.text.Text] = []
         self._uh_artists: list = []
+        self._hover_info: dict[str, T.Any] | None = None
+        self._hover_annotation = self.ax.annotate(
+            '',
+            xy=(0, 0),
+            xytext=(8, 8),
+            textcoords='offset points',
+            ha='left',
+            va='bottom',
+            fontsize=9,
+            zorder=6,
+            bbox=dict(
+                boxstyle='round,pad=0.3',
+                facecolor='white',
+                edgecolor='gray',
+                alpha=0.98,
+            ),
+            path_effects=[
+                mpatheffects.withStroke(linewidth=3.0, foreground='white', alpha=0.9)
+            ],
+        )
+        self._hover_annotation.set_visible(False)
         
         # Basemap Features
         self.ax.add_feature(cfeature.COASTLINE.with_scale('50m'), linewidth=0.6)
@@ -1615,6 +1637,123 @@ class WRFViewer(QMainWindow):
     
     def _do_redraw_from_slider(self):
         self.update_plot()
+
+    def _format_lat(self, lat: float) -> str:
+        hemi = 'N' if lat >= 0 else 'S'
+        return f"{abs(lat):.2f}° {hemi}"
+
+    def _format_lon(self, lon: float) -> str:
+        hemi = 'E' if lon >= 0 else 'W'
+        return f"{abs(lon):.2f}° {hemi}"
+
+    def _units_for_var(self, canonical_var: str, label: str) -> str:
+        v = canonical_var.upper()
+        unit_lookup = {
+            'MDBZ': 'dBZ',
+            'MAXDBZ': 'dBZ',
+            'MDBZ_1HRUH': 'dBZ',
+            'RAINNC': 'mm',
+            'RAINC': 'mm',
+            'SNOW10': 'in',
+            'GUST': 'mph',
+            'WSPD10': 'm s$^{-1}$',
+            'RH2WIND10KT': '%',
+            'T2F': '°F',
+            'TD2F': '°F',
+            'REFL1KM': 'dBZ',
+            'PTYPE': 'in/hr',
+            'SBCAPE': 'J kg$^{-1}$',
+        }
+        if v in unit_lookup:
+            return unit_lookup[v]
+
+        if v in self.upper_air_specs:
+            label = self.upper_air_specs[v].colorbar_label
+
+        start = label.rfind('(')
+        end = label.rfind(')')
+        if 0 <= start < end:
+            return label[start + 1 : end].strip()
+        return ''
+
+    def _format_value(self, value: float, canonical_var: str, units: str) -> str:
+        if not np.isfinite(value):
+            return 'No data'
+
+        v = canonical_var.upper()
+        if v == 'PTYPE':
+            base = int(np.clip(np.floor(value + 1e-6), 0, 3))
+            names = ['Rain', 'Snow', 'Mix', 'Sleet']
+            name = names[base] if 0 <= base < len(names) else 'Precip'
+            rate = value - base
+            rate_inhr = (rate / PTYPE_INTENSITY_SPAN) * PTYPE_MAX_RATE_INHR
+            if rate_inhr > 0.0:
+                return f"{name} ({rate_inhr:.2f} in/hr)"
+            return name
+
+        fmt = '{:.2f}' if abs(value) < 10 else '{:.1f}' if abs(value) < 100 else '{:.0f}'
+        val_txt = fmt.format(value)
+        return f"{val_txt} {units}".strip()
+
+    def _update_hover(self, event: matplotlib.backend_bases.MouseEvent):
+        if not self._hover_info:
+            return
+        if event.inaxes != self.ax:
+            self._hover_annotation.set_visible(False)
+            self.canvas.draw_idle()
+            return
+        if event.xdata is None or event.ydata is None:
+            self._hover_annotation.set_visible(False)
+            self.canvas.draw_idle()
+            return
+
+        lat = self._hover_info.get('lat')
+        lon = self._hover_info.get('lon')
+        data = self._hover_info.get('data')
+        canonical = self._hover_info.get('canonical', '')
+        label = self._hover_info.get('label', '')
+        units = self._hover_info.get('units', '')
+
+        if lat is None or lon is None or data is None:
+            return
+
+        lat_arr = np.asarray(lat)
+        lon_arr = np.asarray(lon)
+        data_arr = np.asarray(data)
+        if lat_arr.shape != lon_arr.shape or lat_arr.shape != data_arr.shape:
+            return
+
+        dy = lat_arr - event.ydata
+        dx = lon_arr - event.xdata
+        dist2 = dx * dx + dy * dy
+        try:
+            idx = np.nanargmin(dist2)
+        except ValueError:
+            self._hover_annotation.set_visible(False)
+            self.canvas.draw_idle()
+            return
+
+        flat_lat = lat_arr.ravel()[idx]
+        flat_lon = lon_arr.ravel()[idx]
+        flat_val = data_arr.ravel()[idx]
+        if not np.isfinite(flat_val):
+            self._hover_annotation.set_visible(False)
+            self.canvas.draw_idle()
+            return
+
+        coord_text = f"{self._format_lat(flat_lat)}  {self._format_lon(flat_lon)}"
+        value_text = self._format_value(flat_val, canonical, units)
+        header = label or canonical
+        lines = [coord_text, value_text]
+        if header:
+            lines.append(header)
+        self._hover_annotation.xy = (flat_lon, flat_lat)
+        self._hover_annotation.set_text('\n'.join(lines))
+        self._hover_annotation.set_visible(True)
+        self.canvas.draw_idle()
+
+    def on_mouse_move(self, event):
+        self._update_hover(event)
     
     def on_open_cmap_folder(self):
         #folder = os.path.expanduser('~/.wrfviewer/colormaps')
@@ -1726,6 +1865,8 @@ class WRFViewer(QMainWindow):
     def update_plot(self):
         if not self.loader.frames:
             return
+        self._hover_info = None
+        self._hover_annotation.set_visible(False)
         idx = self.sld_time.value()
         frame = self.loader.frames[idx]
         self.lbl_time.setText(f'Time: {frame.timestamp_str}')
@@ -1876,6 +2017,14 @@ class WRFViewer(QMainWindow):
         self._uh_threshold_text = overlay_obj.uh_threshold if overlay_obj is not None else None
         self.ax.set_title(self._title_text(display_var, var), loc='center', fontsize=12, fontweight='bold')
         self._draw_value_labels(plot_lat, plot_lon, data, var)
+        self._hover_info = {
+            'lat': np.asarray(plot_lat),
+            'lon': np.asarray(plot_lon),
+            'data': np.asarray(data),
+            'canonical': var,
+            'label': str(display_var),
+            'units': self._units_for_var(var, label),
+        }
         self.canvas.draw_idle()
         
     def _default_range(self, var: str) -> tuple[T.Optional[float], T.Optional[float], str]:
