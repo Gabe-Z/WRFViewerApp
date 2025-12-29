@@ -1572,13 +1572,13 @@ class WRFViewer(QMainWindow):
         
         var_key = str(var).upper()
         return self._var_aliases.get(var_key, var_key)
-
+    
     def _apply_var_colormap(self, canonical_var: str) -> None:
         name = self._var_cmap_lookup.get(canonical_var.upper(), 'Jet')
         cmap = self.cmap_registry.get(name)
         if cmap is None:
             return
-
+        
         self.cmb_cmap.blockSignals(True)
         self.cmb_cmap.setCurrentText(name)
         self.cmb_cmap.blockSignals(False)
@@ -2181,7 +2181,7 @@ class WRFViewer(QMainWindow):
     def _reset_colorbar_ticks(self) -> None:
         if not self._cbar:
             return
-        # Restore any tweaks applied by precipitation-type plots so other colorbars
+        # Restore any tweaks appied by precipitation-type plots so other colorbars
         # use the standard right-hand tick placement without extra offsets.
         ax = self._cbar.ax
         ax.tick_params(axis='y', which='both', labelright=True, labelleft=False, pad=2)
@@ -2193,8 +2193,8 @@ class WRFViewer(QMainWindow):
         ax.yaxis.set_major_formatter(formatter)
         ax.yaxis.set_minor_locator(mticker.NullLocator())
         self._cbar.update_ticks()
-
-        # Matplotlib may reuse tick Text instances between colorbars. Reset the
+        
+        # Matplotlib may refuse tick Text instances between colorbars. Reset the
         # transform for every tick so labels that were nudged for precipitation
         # type plots don't stay offset when we switch back to continuous scales
         # like snowfall totals.
