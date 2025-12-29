@@ -112,6 +112,9 @@ def _surface_based_cape_profile(
     temp_c = temp_c[valid]
     dew_c = dew_c[valid]
     hgt = hgt[valid]
+
+    temp = temp_c
+    dew = dew_c
     
     if not presorted:
         order = np.argsort(pres)[::-1]
@@ -517,7 +520,7 @@ def mixed_layer_parcel_source(
     return mean_pres, mean_temp, mean_dew
 
 
-def parcel_cape_cinh_from_profile(
+def parcel_thermo_indices_from_profile(
     pressure_hpa: np.ndarray,
     temperature_c: np.ndarray,
     dewpoint_c: np.ndarray,
@@ -527,9 +530,13 @@ def parcel_cape_cinh_from_profile(
     start_temperature_c: float | None = None,
     start_dewpoint_c: float | None = None,
     presorted: bool = False,
-) -> tuple[float, float]:
+) -> tuple[float, float, float, float, float, float]:
     '''
-    CAPE and CINH (J/kg) for a parcel starting at the specified thermodynamic point.
+    Thermodynamic indices for a parcel starting at the specified thermodynamic point.
+
+    Returns a tuple of (CAPE, CINH, LCL_height_m, LFC_height_m, EL_height_m, LiftedIndex_C).
+    Heights are above ground level and the Lifted Index is the 500-hPa ambient
+    temperature minus the parcel temperature at 500 hPa.
     '''
     
     pres = np.asarray(pressure_hpa, dtype=float32)
@@ -539,7 +546,7 @@ def parcel_cape_cinh_from_profile(
     
     valid = np.isfinite(pres) & np.isfinite(temp_c) & np.isfinite(dew_c) & np.isfinite(hgt)
     if valid.sum() < 3:
-        return np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
     
     pres = pres[valid]
     temp_c = temp_c[valid]
@@ -547,22 +554,34 @@ def parcel_cape_cinh_from_profile(
     hgt = hgt[valid]
     
     if not presorted:
-        order = np.argsort(pres)[::-1]
-        pres = pres[order]
-        temp = temp_c[order]
-        dew = dew_c[order]
-        hgt = hgt[order]
+        order_start = np.argsort(pres)[::-1]
+        pres = pres[order_start]
+        temp = temp_c[order_start]
+        dew = dew_c[order_start]
+        hgt = hgt[order_start]
     elif pres[0] < pres[-1]:
         pres = pres[::-1]
-        temp_c = temp_c[::-1]
-        dew_c = dew_c[::-1]
+        temp = temp_c[::-1]
+        dew = dew_c[::-1]
         hgt = hgt[::-1]
-    
-    vt_env_c = virtual_temperature_profile(pres, temp_c, dew_c)
+    else:
+        order_start = np.argsort(pres)[::-1]
+        pres = pres[order_start]
+        temp = temp_c[order_start]
+        dew = dew_c[order_start]
+        hgt = hgt[order_start]
+
+    start_idx = 0 if start_pressure_hpa is None else int(np.nanargmin(np.abs(pres - start_pressure_hpa)))
+    start_p = float(start_pressure_hpa) if start_pressure_hpa is not None else float(pres[start_idx])
+    start_temp_c = float(start_temperature_c) if start_temperature_c is not None else float(temp[start_idx])
+    start_dew_c = float(start_dewpoint_c) if start_dewpoint_c is not None else float(dew[start_idx])
+    _, plcl_hpa = lcl_temperature_pressure(start_p, start_temp_c, start_dew_c)
+
+    vt_env_c = virtual_temperature_profile(pres, temp, dew)
     vt_parcel_c = parcel_trace_temperature_profile(
         pres,
-        temp_c,
-        dew_c,
+        temp,
+        dew,
         start_pressure_hpa=start_pressure_hpa,
         start_temperature_c=start_temperature_c,
         start_dewpoint_c=start_dewpoint_c,
@@ -570,12 +589,15 @@ def parcel_cape_cinh_from_profile(
     
     valid_vt = np.isfinite(vt_env_c) & np.isfinite(vt_parcel_c) & np.isfinite(hgt)
     if valid_vt.sum() < 2:
-        return np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
     
     pres = pres[valid_vt]
-    vt_env_k = vt_env_c[valid_vt] + 273.15
-    vt_parcel_k = vt_parcel_c[valid_vt] + 273.15
+    vt_env_c = vt_env_c[valid_vt]
+    vt_parcel_c = vt_parcel_c[valid_vt]
+    vt_env_k = vt_env_c + 273.15
+    vt_parcel_k = vt_parcel_c + 273.15
     hgt = hgt[valid_vt]
+    temp = temp[valid_vt]
     
     # CAPE/CINH integration assumes a strictly increasing height profile. Some
     # WRF outputs occasionally carry flat or slightly inverted heights near the
@@ -587,7 +609,9 @@ def parcel_cape_cinh_from_profile(
     pres = pres[order]
     vt_env_k = vt_env_k[order]
     vt_parcel_k = vt_parcel_k[order]
+    vt_parcel_c_sorted = vt_parcel_c[order]
     hgt = hgt[order]
+    temp = temp[order]
     
     hgt_sorted = hgt
     hgt_agl = hgt_sorted - float(hgt_sorted[0])
@@ -610,26 +634,38 @@ def parcel_cape_cinh_from_profile(
     
     buoyancy = np.asarray(buoyancy, dtype=float32)
     if not np.isfinite(buoyancy).any():
-        return np.nan, np.nan
+        return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
     
+    # Estimate heights for key parcel levels using pressure-to-height interpolation.
+    lcl_height = np.nan
+    if np.isfinite(plcl_hpa) and pres.min() <= plcl_hpa <= pres.max():
+        lcl_height = float(np.interp(plcl_hpa, pres[::-1], hgt[::-1]))
+
+    lfc_search_idx = 0
+    if np.isfinite(lcl_height):
+        lfc_search_idx = int(np.searchsorted(hgt, lcl_height, side='left'))
+
     # Locate the first level of positive buoyancy (LFC) to bound CINH to the
     # layer the parcel must lift through. If no positive buoyancy exists, CAPE
     # is zero and CINH is simply the integrated negative buoyancy of the
     # profile.
-    positive_idx = np.where(buoyancy > 0.0)[0]
+    positive_idx = np.where((np.arange(buoyancy.size) >= lfc_search_idx) & (buoyancy > 0.0))[0]
     if positive_idx.size == 0:
         # No positive buoyancy means the parcel never becomes unstable. Treat the
         # profile as zero CAPE/zero CINH instead of letting deep cold layers
         # integrate large negative buoyancy.
-        return 0.0, 0.0
-    
+        return 0.0, 0.0, lcl_height, np.nan, np.nan, np.nan
+
     lfc_idx = int(positive_idx[0])
     lfc_height = hgt[lfc_idx]
-    if lfc_idx > 0 and buoyancy[lfc_idx - 1] < 0.0:
+    if lfc_idx > 0 and buoyancy[lfc_idx - 1] <= 0.0:
         frac = -buoyancy[lfc_idx - 1] / np.clip(
             buoyancy[lfc_idx] - buoyancy[lfc_idx - 1], 1e-6, None
         )
         lfc_height = hgt[lfc_idx - 1] + frac * (hgt[lfc_idx] - hgt[lfc_idx - 1])
+
+    if np.isfinite(lcl_height):
+        lfc_height = max(lfc_height, lcl_height)
     
     # The equilibrium level is the level above the last positive buoyancy where
     # the parcel returns to neutral or negative and does not become unstable
@@ -647,20 +683,31 @@ def parcel_cape_cinh_from_profile(
                 buoyancy[last_pos_idx] - buoyancy[el_idx], 1e-6, None
             )
             el_height = hgt[last_pos_idx] + frac * (hgt[el_idx] - hgt[last_pos_idx])
-        else:
-            el_idx = buoyancy.size - 1
-            el_height = hgt[-1]
+    else:
+        el_idx = buoyancy.size - 1
+        el_height = hgt[-1]
     
     cinh_h = np.concatenate([hgt[:lfc_idx], [lfc_height]])
     cinh_b = np.concatenate([buoyancy[:lfc_idx], [0.0]])
     cinh = np.trapz(np.clip(cinh_b, None, 0.0), cinh_h)
-    
+
     cape_h = np.concatenate([[lfc_height], hgt[lfc_idx:el_idx], [el_height]])
     cape_b = np.concatenate([[0.0], buoyancy[lfc_idx:el_idx], [0.0]])
     cape = np.trapz(np.clip(cape_b, 0.0, None), cape_h)
-    
+
     cape = float(np.clip(cape, 0.0, None))
     cinh = float(cinh)
+
+    # Lifted index at 500 hPa (ambient temp minus parcel temp).
+    li = np.nan
+    target_pres = 500.0
+    if pres.min() <= target_pres <= pres.max():
+        env_temp_500 = float(np.interp(target_pres, pres[::-1], temp[::-1]))
+        parcel_temp_500 = float(np.interp(target_pres, pres[::-1], vt_parcel_c_sorted[::-1]))
+        li = env_temp_500 - parcel_temp_500
+
+    lfc_height_final = lfc_height if np.isfinite(lfc_height) else np.nan
+    el_height_final = el_height if np.isfinite(el_height) else np.nan
     
     if cape <= 1e-3:
         # When CAPE is effectively zero (e.g., very cold/stable profiles),
@@ -668,7 +715,35 @@ def parcel_cape_cinh_from_profile(
         # inhibition values.
         cape = 0.0
         cinh = 0.0
-    
+
+    return cape, cinh, lcl_height, lfc_height_final, el_height_final, li
+
+
+def parcel_cape_cinh_from_profile(
+    pressure_hpa: np.ndarray,
+    temperature_c: np.ndarray,
+    dewpoint_c: np.ndarray,
+    height_m: np.ndarray,
+    *,
+    start_pressure_hpa: float | None = None,
+    start_temperature_c: float | None = None,
+    start_dewpoint_c: float | None = None,
+    presorted: bool = False,
+) -> tuple[float, float]:
+    '''
+    CAPE and CINH (J/kg) for a parcel starting at the specified thermodynamic point.
+    '''
+
+    cape, cinh, *_ = parcel_thermo_indices_from_profile(
+        pressure_hpa,
+        temperature_c,
+        dewpoint_c,
+        height_m,
+        start_pressure_hpa=start_pressure_hpa,
+        start_temperature_c=start_temperature_c,
+        start_dewpoint_c=start_dewpoint_c,
+        presorted=presorted,
+    )
     return cape, cinh
     
 
