@@ -348,6 +348,7 @@ class SoundingWindow(QMainWindow):
         el: float,
         unstable: bool,
     ) -> None:
+        row_unstable = unstable and np.isfinite(cape) and cape > 0.0
         if label == 'MU':
             label_widget = QLabel(label)
             label_widget.setStyleSheet('color: yellow; font-size: 13px; font-weight: 600;')
@@ -365,19 +366,19 @@ class SoundingWindow(QMainWindow):
         cinh_widget.setStyleSheet(f'color: {self._cinh_color(cinh)}; font-size: 13px;')
         cinh_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
         
-        lcl_widget = QLabel(self._format_height_value(unstable, lcl))
+        lcl_widget = QLabel(self._format_height_value(row_unstable, lcl))
         lcl_widget.setStyleSheet(f'color: white; font-size: 13px;')
         lcl_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-        
-        lfc_widget = QLabel(self._format_height_value(unstable, lfc))
+
+        lfc_widget = QLabel(self._format_height_value(row_unstable, lfc))
         lfc_widget.setStyleSheet(f'color: white; font-size: 13px;')
         lfc_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-        
-        li_widget = QLabel(self._format_lifted_index(unstable, li))
+
+        li_widget = QLabel(self._format_lifted_index(row_unstable, li))
         li_widget.setStyleSheet(f'color: white; font-size: 13px;')
         li_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-        
-        el_widget = QLabel(self._format_height_value(unstable, el))
+
+        el_widget = QLabel(self._format_height_value(row_unstable, el))
         el_widget.setStyleSheet(f'color: white; font-size: 13px;')
         el_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
         
@@ -482,7 +483,7 @@ class SoundingWindow(QMainWindow):
         converter = getattr(self, '_pressure_from_profile', None)
         if converter is not None:
             pressure = converter(height_m)
-            if np.isfinite(pressure):
+            if pressure is not None and np.isfinite(pressure):
                 return pressure
         return _standard_atmosphere_pressure(height_m)
     

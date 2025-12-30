@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import numpy as np
 from matplotlib.transforms import Affine2D
 from netCDF4 import Dataset
@@ -84,6 +85,78 @@ def virtual_temperature_profile(
     return vt_c
 
 
+def _enforce_monotonic_height(height_m: np.ndarray) -> np.ndarray:
+    '''
+    Return a version of ``height_m`` that is monotonically increasing along the first axis.
+
+    Small non-physical inversions occasionally appear near the surface over
+    complex terrain and can collapse layer depths to ~0 m, which zeroes out the
+    buoyancy integral. This helper nudges each level upward by the smallest
+    amount needed to keep the profile strictly increasing without materially
+    altering its shape.
+    '''
+
+    hgt = np.asarray(height_m, dtype=float32)
+    if hgt.ndim == 1:
+        if hgt.size == 0:
+            return hgt
+        fixed = np.array(hgt, dtype=float32)
+        for idx in range(1, fixed.size):
+            if fixed[idx] <= fixed[idx - 1]:
+                fixed[idx] = fixed[idx - 1] + 1e-3
+        return fixed
+
+    fixed = np.array(hgt, dtype=float32)
+    nz = fixed.shape[0]
+    for lvl in range(1, nz):
+        prev = fixed[lvl - 1]
+        cur = fixed[lvl]
+        mask = cur <= prev
+        if np.any(mask):
+            fixed[lvl, mask] = prev[mask] + 1e-3
+    return fixed
+
+
+def _integrate_positive_buoyancy(height_m: np.ndarray, buoyancy: np.ndarray) -> float:
+    '''
+    Integrate positive buoyancy (J/kg) using zero-crossing interpolation.
+
+    The integration assumes the inputs are 1-D profiles with matching shapes.
+    '''
+
+    hgt = np.asarray(height_m, dtype=float32)
+    b = np.asarray(buoyancy, dtype=float32)
+    valid = np.isfinite(hgt) & np.isfinite(b)
+    if valid.sum() < 2:
+        return np.nan
+
+    hgt = hgt[valid]
+    b = b[valid]
+
+    order = np.argsort(hgt)
+    hgt = _enforce_monotonic_height(hgt[order])
+    b = b[order]
+
+    energy = 0.0
+    for idx in range(b.size - 1):
+        b0 = b[idx]
+        b1 = b[idx + 1]
+        h0 = hgt[idx]
+        h1 = hgt[idx + 1]
+
+        if b0 >= 0.0 and b1 >= 0.0:
+            energy += 0.5 * (b0 + b1) * (h1 - h0)
+        elif b0 >= 0.0 > b1:
+            frac = b0 / np.clip(b0 - b1, 1e-6, None)
+            h_cross = h0 + frac * (h1 - h0)
+            energy += 0.5 * b0 * (h_cross - h0)
+        elif b0 < 0.0 <= b1:
+            frac = b1 / np.clip(b1 - b0, 1e-6, None)
+            h_cross = h0 + frac * (h1 - h0)
+            energy += 0.5 * b1 * (h1 - h_cross)
+
+    return float(np.clip(energy, 0.0, None))
+
 def _surface_based_cape_profile(
     pressure_hpa: np.ndarray,
     temperature_c: np.ndarray,
@@ -140,21 +213,16 @@ def _surface_based_cape_profile(
     pres = pres[valid_vt]
     vt_env_k = vt_env_c[valid_vt] + 273.15
     vt_parcel_k = vt_parcel_c[valid_vt] + 273.15
-    hgt = hgt[valid_vt]
+    hgt = _enforce_monotonic_height(hgt[valid_vt])
     
     sort_h = np.argsort(hgt)
     hgt = hgt[sort_h]
     vt_env_k = vt_env_k[sort_h]
     vt_parcel_k = vt_parcel_k[sort_h]
-    
+
     with np.errstate(divide='ignore', invalid='ignore'):
         buoyancy = G0 * (vt_parcel_k - vt_env_k) / np.clip(vt_env_k, 1e-6, None)
-    positive = np.clip(buoyancy, 0.0, None)
-    if not np.isfinite(positive).any():
-        return np.nan
-    
-    cape = np.trapz(positive, hgt)
-    return float(np.clip(cape, 0.0, None))
+    return _integrate_positive_buoyancy(hgt, buoyancy)
 
 
 def surface_based_cape_from_profile(
@@ -401,27 +469,28 @@ def _surface_based_cape_profiles_vectorized(
     mixing_ratio = np.full_like(parcel_temps_k, np.nan, dtype=float32)
     if dry_mask.any():
         mixing_ratio[dry_mask] = np.broadcast_to(surf_r, dry_mask.shape)[dry_mask]
-    
+
     sat_mr = saturation_mixing_ratio(pres[:, column_valid] * 100.0, parcel_temps_k)
     moist_mask = ~dry_mask & np.isfinite(parcel_temps_k)
     if moist_mask.any():
         mixing_ratio[moist_mask] = sat_mr[moist_mask]
-    
+
     parcel_virtual_k = virtual_temperature(parcel_temps_k, mixing_ratio)
-    parcel_virtual_c = parcel_virtual_k - 273.15
-    
     env_mixing_ratio = _mixing_ratio_from_dewpoint(pres[:, column_valid], dew_c[:, column_valid])
     env_virtual_k = virtual_temperature(temp_k[:, column_valid], env_mixing_ratio)
-    
+
     with np.errstate(divide='ignore', invalid='ignore'):
         buoyancy = G0 * (parcel_virtual_k - env_virtual_k) / np.clip(env_virtual_k, 1e-6, None)
-    buoyancy = np.clip(buoyancy, 0.0, None)
-    
-    hgt_col = hgt[:, column_valid]
-    cape = np.trapz(buoyancy, hgt_col, axis=0)
-    
+
+    hgt_col = _enforce_monotonic_height(hgt[:, column_valid])
+    # Fast vectorized integration of positive buoyancy. Using trapz on clipped
+    # buoyancy avoids a Python loop over every grid column and dramatically
+    # reduces UI latency when the user requests SBCAPE fields.
+    cape = np.trapz(np.clip(buoyancy, 0.0, None), hgt_col, axis=0)
+    cape = np.clip(cape, 0.0, None)
+
     result = np.full(ncol, np.nan, dtype=float32)
-    result[column_valid] = np.clip(cape, 0.0, None)
+    result[column_valid] = cape
     return result
 
 
@@ -576,6 +645,12 @@ def parcel_thermo_indices_from_profile(
     start_temp_c = float(start_temperature_c) if start_temperature_c is not None else float(temp[start_idx])
     start_dew_c = float(start_dewpoint_c) if start_dewpoint_c is not None else float(dew[start_idx])
     _, plcl_hpa = lcl_temperature_pressure(start_p, start_temp_c, start_dew_c)
+    if np.isfinite(plcl_hpa):
+        # The parcel cannot condense at a pressure higher than its start level.
+        # Clamp to the starting pressure to keep LCL interpolation within the
+        # observed profile instead of falling outside the pressure range and
+        # returning NaN heights for buoyant parcels.
+        plcl_hpa = float(np.clip(plcl_hpa, pres.min(), start_p))
     
     vt_env_c = virtual_temperature_profile(pres, temp, dew)
     vt_parcel_c = parcel_trace_temperature_profile(
@@ -586,55 +661,58 @@ def parcel_thermo_indices_from_profile(
         start_temperature_c=start_temperature_c,
         start_dewpoint_c=start_dewpoint_c,
     )
-    
-    valid_vt = np.isfinite(vt_env_c) & np.isfinite(vt_parcel_c) & np.isfinite(hgt)
-    if valid_vt.sum() < 2:
-        return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
-    
-    pres = pres[valid_vt]
-    vt_env_c = vt_env_c[valid_vt]
-    vt_parcel_c = vt_parcel_c[valid_vt]
-    vt_env_k = vt_env_c + 273.15
-    vt_parcel_k = vt_parcel_c + 273.15
-    hgt = hgt[valid_vt]
-    temp = temp[valid_vt]
-    
-    # CAPE/CINH integration assumes a strictly increasing height profile. Some
-    # WRF outputs occasionally carry flat or slightly inverted heights near the
-    # surface (especially over complex terrain) that collapse the layer
-    # thickness to ~0 m and zero-out buoyancy integrals. Normalize the profile to
-    # surface-first pressure order and rebuild a monotonic AGL height using the
-    # hypsometric equation so buoyancy integrates over realistic layer depths.
+
+    # Normalize profiles to surface-first order before rebuilding heights so
+    # parcels starting aloft keep the correct AGL reference instead of being
+    # re-anchored to 0 m at their start level.
     order = np.argsort(pres)[::-1]
     pres = pres[order]
-    vt_env_k = vt_env_k[order]
-    vt_parcel_k = vt_parcel_k[order]
-    vt_parcel_c_sorted = vt_parcel_c[order]
-    hgt = hgt[order]
     temp = temp[order]
-    
-    hgt_sorted = hgt
-    hgt_agl = hgt_sorted - float(hgt_sorted[0])
-    
-    if np.any(np.diff(hgt_agl) < 0.0):
-        # Guard against inverted or flat terrain/level geometry by rebuilding a
-        # monotonic height structure from the hypsometric equation. Anchor the
-        # synthetic profile at the surface so the parcel still lifts through a
-        # realistic depth even when raw model heights are noisy.
-        hgt_agl = np.zeros_like(pres, dtype=float32)
-        for idx in range(1, pres.size):
-            tv_bar = 0.5 * (vt_env_k[idx - 1] + vt_env_k[idx])
-            dp_ratio = np.log(np.clip(pres[idx - 1] / pres[idx], 1e-6, None))
-            hgt_agl[idx] = hgt_agl[idx - 1] + (RD / G0) * tv_bar * dp_ratio
-    
-    hgt = hgt_agl
+    dew = dew[order]
+    hgt = hgt[order]
+    vt_env_c = vt_env_c[order]
+    vt_parcel_c = vt_parcel_c[order]
+
+    vt_env_k = vt_env_c + 273.15
+    vt_parcel_k = vt_parcel_c + 273.15
+
+    # Rebuild a smooth, monotonic AGL height profile directly from the
+    # hypsometric equation so equilibrium-level searches use physically
+    # consistent layer depths even when raw model heights contain noise or
+    # terrain artifacts. Anchoring at 0 m avoids negative heights while still
+    # preserving realistic depth between pressure levels.
+    hgt_agl = np.zeros_like(pres, dtype=float32)
+    for idx in range(1, pres.size):
+        tv_bar = 0.5 * (vt_env_k[idx - 1] + vt_env_k[idx])
+        dp_ratio = np.log(np.clip(pres[idx - 1] / pres[idx], 1e-6, None))
+        hgt_agl[idx] = hgt_agl[idx - 1] + (RD / G0) * tv_bar * dp_ratio
+
+    hgt_agl = _enforce_monotonic_height(hgt_agl)
+
+    valid_vt = np.isfinite(vt_env_k) & np.isfinite(vt_parcel_k) & np.isfinite(hgt_agl)
+    if valid_vt.sum() < 2:
+        return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
+
+    pres = pres[valid_vt]
+    vt_env_k = vt_env_k[valid_vt]
+    vt_parcel_k = vt_parcel_k[valid_vt]
+    vt_parcel_c = vt_parcel_c[valid_vt]
+    hgt = hgt_agl[valid_vt]
+    temp = temp[valid_vt]
     
     with np.errstate(divide='ignore', invalid='ignore'):
         buoyancy = G0 * (vt_parcel_k - vt_env_k) / np.clip(vt_env_k, 1e-6, None)
-    
+
     buoyancy = np.asarray(buoyancy, dtype=float32)
     if not np.isfinite(buoyancy).any():
         return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
+
+    def _zero_cross_height(h0: float, h1: float, b0: float, b1: float) -> float:
+        denom = b1 - b0
+        if abs(denom) < 1e-6:
+            denom = math.copysign(1e-6, denom if denom != 0 else 1.0)
+        frac = -b0 / denom
+        return h0 + frac * (h1 - h0)
     
     # Estimate heights for key parcel levels using pressure-to-height interpolation.
     lcl_height = np.nan
@@ -654,17 +732,20 @@ def parcel_thermo_indices_from_profile(
         # No positive buoyancy means the parcel never becomes unstable. Treat the
         # profile as zero CAPE/zero CINH instead of letting deep cold layers
         # integrate large negative buoyancy.
-        return 0.0, 0.0, lcl_height, np.nan, np.nan, np.nan
+        return 0.0, 0.0, np.nan, np.nan, np.nan, np.nan
     
     lfc_idx = int(positive_idx[0])
     lfc_height = hgt[lfc_idx]
+    lfc_buoy = buoyancy[lfc_idx]
     if lfc_idx > 0 and buoyancy[lfc_idx - 1] <= 0.0:
-        frac = -buoyancy[lfc_idx - 1] / np.clip(
-            buoyancy[lfc_idx] - buoyancy[lfc_idx - 1], 1e-6, None
+        lfc_height = _zero_cross_height(
+            hgt[lfc_idx - 1], hgt[lfc_idx], buoyancy[lfc_idx - 1], buoyancy[lfc_idx]
         )
-        lfc_height = hgt[lfc_idx - 1] + frac * (hgt[lfc_idx] - hgt[lfc_idx - 1])
-    
+        lfc_buoy = 0.0
+
     if np.isfinite(lcl_height):
+        if lcl_height > lfc_height:
+            lfc_buoy = 0.0
         lfc_height = max(lfc_height, lcl_height)
     
     # The equilibrium level is the level above the last positive buoyancy where
@@ -673,27 +754,43 @@ def parcel_thermo_indices_from_profile(
     # the parcel quickly re-enters a buoyant layer aloft.
     pos_after_lfc = np.where((np.arange(buoyancy.size) >= lfc_idx) & (buoyancy > 0.0))[0]
     last_pos_idx = int(pos_after_lfc[-1])
-    
-    el_candidates = np.where((np.arange(buoyancy.size) > last_pos_idx) & (buoyancy <= 0.0))[0]
-    if el_candidates.size:
-        el_idx = int(el_candidates[0])
-        el_height = hgt[el_idx]
-        if buoyancy[el_idx] < 0.0 and buoyancy[last_pos_idx] > 0.0:
-            frac = buoyancy[last_pos_idx] / np.clip(
-                buoyancy[last_pos_idx] - buoyancy[el_idx], 1e-6, None
-            )
-            el_height = hgt[last_pos_idx] + frac * (hgt[el_idx] - hgt[last_pos_idx])
+
+    el_idx = None
+    el_height = np.nan
+    el_buoy = np.nan
+
+    # Prefer the first zero-crossing *after the final* positive layer, which
+    # better matches the conceptual "top" of the final buoyant plume when the
+    # profile briefly dips negative and recovers aloft. Starting the search at
+    # ``last_pos_idx`` avoids prematurely selecting a lower negative excursion
+    # when buoyancy becomes positive again above it.
+    for idx in range(last_pos_idx, buoyancy.size - 1):
+        b0 = buoyancy[idx]
+        b1 = buoyancy[idx + 1]
+        if b0 > 0.0 and b1 <= 0.0:
+            el_height = _zero_cross_height(hgt[idx], hgt[idx + 1], b0, b1)
+            el_buoy = 0.0
+            el_idx = idx + 1
+            break
+
+    if el_idx is None:
+        el_candidates = np.where((np.arange(buoyancy.size) > last_pos_idx) & (buoyancy <= 0.0))[0]
+        if el_candidates.size:
+            el_idx = int(el_candidates[0])
+            el_height = hgt[el_idx]
+            el_buoy = buoyancy[el_idx]
         else:
             el_idx = buoyancy.size - 1
             el_height = hgt[-1]
-    
+            el_buoy = buoyancy[-1]
+
     cinh_h = np.concatenate([hgt[:lfc_idx], [lfc_height]])
     cinh_b = np.concatenate([buoyancy[:lfc_idx], [0.0]])
     cinh = np.trapz(np.clip(cinh_b, None, 0.0), cinh_h)
-    
-    cape_h = np.concatenate([[lfc_height], hgt[lfc_idx:el_idx], [el_height]])
-    cape_b = np.concatenate([[0.0], buoyancy[lfc_idx:el_idx], [0.0]])
-    cape = np.trapz(np.clip(cape_b, 0.0, None), cape_h)
+
+    cape_h = np.concatenate([[lfc_height], hgt[lfc_idx + 1:el_idx], [el_height]])
+    cape_b = np.concatenate([[lfc_buoy], buoyancy[lfc_idx + 1:el_idx], [el_buoy]])
+    cape = _integrate_positive_buoyancy(cape_h, cape_b)
     
     cape = float(np.clip(cape, 0.0, None))
     cinh = float(cinh)
@@ -703,19 +800,24 @@ def parcel_thermo_indices_from_profile(
     target_pres = 500.0
     if pres.min() <= target_pres <= pres.max():
         env_temp_500 = float(np.interp(target_pres, pres[::-1], temp[::-1]))
-        parcel_temp_500 = float(np.interp(target_pres, pres[::-1], vt_parcel_c_sorted[::-1]))
+        parcel_temp_profile_c = vt_parcel_k - 273.15
+        parcel_temp_500 = float(np.interp(target_pres, pres[::-1], parcel_temp_profile_c[::-1]))
         li = env_temp_500 - parcel_temp_500
     
     lfc_height_final = lfc_height if np.isfinite(lfc_height) else np.nan
     el_height_final = el_height if np.isfinite(el_height) else np.nan
+
+    if np.isfinite(el_height_final) and el_height_final < 0.0:
+        el_height_final = np.nan
     
     if cape <= 1e-3:
         # When CAPE is effectively zero (e.g., very cold/stable profiles),
-        # suppress CINH so the display does not accumulate large negative
-        # inhibition values.
+        # suppress CINH and hide heights so the display does not accumulate
+        # misleading values for stable parcels.
         cape = 0.0
         cinh = 0.0
-    
+        return cape, cinh, np.nan, np.nan, np.nan, np.nan
+
     return cape, cinh, lcl_height, lfc_height_final, el_height_final, li
     
 
@@ -744,7 +846,7 @@ def parcel_cape_cinh_from_profile(
         start_dewpoint_c=start_dewpoint_c,
         presorted=presorted,
     )
-    return cape, cinh
+    return cape, cin
 
 
 def ptype_rate_offset(rate: np.ndarray | float) -> np.ndarray | float:
