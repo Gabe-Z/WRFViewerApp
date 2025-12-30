@@ -30,6 +30,7 @@ import matplotlib.transforms as mtransforms
 import matplotlib.ticker as mticker
 import numpy as np
 import os
+import platform
 import shutil
 import sys
 import typing as T
@@ -55,6 +56,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QCheckBox,
     QMessageBox,
     QPushButton,
     QLineEdit,
@@ -1319,6 +1321,12 @@ class WRFViewer(QMainWindow):
         self.lon_input.setFixedWidth(110)
         controls.addWidget(self.lon_input)
         
+        controls.addWidget(QLabel('Use Contourf'))
+        self.use_contourf_checkbox = QCheckBox()
+        self.use_contourf_checkbox.setChecked(False)
+        self.use_contourf_checkbox.toggled.connect(self.on_fill_method_toggled)
+        controls.addWidget(self.use_contourf_checkbox)
+        
         controls.addStretch(1)
         
         self.btn_play = QPushButton('▶ Play')
@@ -1866,6 +1874,10 @@ class WRFViewer(QMainWindow):
                 self.canvas.draw_idle()
         #self.update_plot()
     
+    def on_fill_method_toggled(self, checked: bool):
+        self._clear_img_art()
+        self.update_plot()
+    
     def on_preload(self):
         if not self.loader.frames:
             return
@@ -1926,7 +1938,8 @@ class WRFViewer(QMainWindow):
         idx = self.sld_time.value()
         frame = self.loader.frames[idx]
         self.lbl_time.setText(f'Time: {frame.timestamp_str}')
-        self._timestamp_text.set_text(f'WRF Gabe Zago   {frame.timestamp_str}')
+        computer_name = (platform.node() or 'computer').replace(' ', '_')
+        self._timestamp_text.set_text(f'WRF {computer_name} - App created by Gabe Zago - {frame.timestamp_str}')
         
         display_var = self.current_var_label
         var = self.loader._var_key(self._canonical_var(display_var))
@@ -2010,29 +2023,29 @@ class WRFViewer(QMainWindow):
         if var.upper() == 'PTYPE':
             cmap_to_use, norm, tick_values, tick_labels = self._precip_type_style()
             #self.loader._log_debug(f'PTYPE plot alignment: data shape={data.shape}, lat shape={plot_lat.shape}, lon shape={plot_lon.shape}, ticks={tick_values}')
+        use_contourf = self.use_contourf_checkbox.isChecked()
         
-        # Create once /then resure for speed
-        if self._img_art is None or self._img_shape != data.shape:
-            if self._img_art is not None:
-                try:
-                    self._img_art.remove()
-                except Exception:
-                    pass
-            
-            self._img_art = self.ax.pcolormesh(
-                plot_lon, plot_lat, data,
-                transform=ccrs.PlateCarree(),
+        if use_contourf:
+            self._clear_img_art()
+            levels = None
+            if norm is None and vmin is not None and vmax is not None:
+                levels = np.linspace(vmin, vmax, 51)
+            self._img_art = self.ax.contourf(
+                plot_lon,
+                plot_lat,
+                data,
+                levels=levels,
+                transforms=ccrs.PlateCarree(),
                 cmap=cmap_to_use,
                 norm=norm,
-                shading='nearest',
-                vmin=vmin, vmax=vmax,
-                antialiased=False,
-                rasterized=True,
+                vmin=vmin,
+                vmax=vmax,
             )
             self._img_shape = data.shape
-            
             if self._cbar is None:
                 self._cbar = self.fig.colorbar(self._img_art, ax=self.ax, orientation='vertical', shrink=0.8, pad=0.02)
+            else:
+                self._cbar.update_normal(self._img_art)
             self._cbar.set_label(label)
             if tick_values is not None and tick_labels is not None:
                 self._cbar.set_ticks(tick_values)
@@ -2042,25 +2055,61 @@ class WRFViewer(QMainWindow):
             else:
                 self._reset_colorbar_ticks()
         else:
-            # Update only face colors and limits
-            # pcolormesh set_array expects one value per face; averaging corners is okay for speed.
-            self._img_art.set_array(np.asarray(data).ravel())
-            self._img_art.set_cmap(cmap_to_use)
-            if norm is not None:
-                self._img_art.set_norm(norm)
+            if self._img_art is not None and hasattr(self._img_art, 'collections'):
+                self._clear_img_art()
+
+            # Create once /then resure for speed
+            if self._img_art is None or self._img_shape != data.shape:
+                if self._img_art is not None:
+                    try:
+                        self._img_art.remove()
+                    except Exception:
+                        pass
+                
+                self._img_art = self.ax.pcolormesh(
+                    plot_lon, plot_lat, data,
+                    transform=ccrs.PlateCarree(),
+                    cmap=cmap_to_use,
+                    norm=norm,
+                    shading='nearest',
+                    vmin=vmin, vmax=vmax,
+                    antialiased=False,
+                    rasterized=True,
+                )
+                self._img_shape = data.shape
+                
+                if self._cbar is None:
+                    self._cbar = self.fig.colorbar(self._img_art, ax=self.ax, orientation='vertical', shrink=0.8, pad=0.02)
+                else:
+                    self._cbar.update_normal(self._img_art)
+                self._cbar.set_label(label)
+                if tick_values is not None and tick_labels is not None:
+                    self._cbar.set_ticks(tick_values)
+                    self._cbar.set_ticklabels(tick_labels)
+                    if var.upper() == 'PTYPE':
+                        self._nudge_precip_type_ticks()
+                else:
+                    self._reset_colorbar_ticks()
             else:
-                self._img_art.set_norm(Normalize(vmin=vmin, vmax=vmax))
-            if vmin is not None and vmax is not None:
-                self._img_art.set_clim(vmin, vmax)
-            self._cbar.update_normal(self._img_art)
-            self._cbar.set_label(label)
-            if tick_values is not None and tick_labels is not None:
-                self._cbar.set_ticks(tick_values)
-                self._cbar.set_ticklabels(tick_labels)
-                if var.upper() == 'PTYPE':
-                    self._nudge_precip_type_ticks()
-            else:
-                self._reset_colorbar_ticks()
+                # Update only face colors and limits
+                # pcolormesh set_array expects one value per face; averaging corners is okay for speed.
+                self._img_art.set_array(np.asarray(data).ravel())
+                self._img_art.set_cmap(cmap_to_use)
+                if norm is not None:
+                    self._img_art.set_norm(norm)
+                else:
+                    self._img_art.set_norm(Normalize(vmin=vmin, vmax=vmax))
+                if vmin is not None and vmax is not None:
+                    self._img_art.set_clim(vmin, vmax)
+                self._cbar.update_normal(self._img_art)
+                self._cbar.set_label(label)
+                if tick_values is not None and tick_labels is not None:
+                    self._cbar.set_ticks(tick_values)
+                    self._cbar.set_ticklabels(tick_labels)
+                    if var.upper() == 'PTYPE':
+                        self._nudge_precip_type_ticks()
+                else:
+                    self._reset_colorbar_ticks()
         
         if spec:
             self._draw_upper_overlays(plot_lat, plot_lon, data_obj, spec)
@@ -2386,6 +2435,21 @@ class WRFViewer(QMainWindow):
             self._uh_artists.append(outline)
         if fill is not None:
             self._uh_artists.append(fill)
+    
+    def _clear_img_art(self) -> None:
+        if self._img_art is None:
+            return
+        try:
+            collections = getattr(self._img_art, 'collections', None)
+            if collections:
+                for coll in list(collections):
+                    coll.remove()
+            else:
+                self._img_art.remove()
+        except Exception:
+            pass
+        self._img_art = None
+        self._img_shape = None
     
     def _reset_colorbar_ticks(self) -> None:
         if not self._cbar:
