@@ -369,15 +369,15 @@ class SoundingWindow(QMainWindow):
         lcl_widget = QLabel(self._format_height_value(row_unstable, lcl))
         lcl_widget.setStyleSheet(f'color: white; font-size: 13px;')
         lcl_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-
+        
         lfc_widget = QLabel(self._format_height_value(row_unstable, lfc))
         lfc_widget.setStyleSheet(f'color: white; font-size: 13px;')
         lfc_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-
+        
         li_widget = QLabel(self._format_lifted_index(row_unstable, li))
         li_widget.setStyleSheet(f'color: white; font-size: 13px;')
         li_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)
-
+        
         el_widget = QLabel(self._format_height_value(row_unstable, el))
         el_widget.setStyleSheet(f'color: white; font-size: 13px;')
         el_widget.setAlignment(Qt.AlignLeft | Qt.AlignCenter)

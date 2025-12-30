@@ -88,24 +88,24 @@ def virtual_temperature_profile(
 def _enforce_monotonic_height(height_m: np.ndarray) -> np.ndarray:
     '''
     Return a version of ``height_m`` that is monotonically increasing along the first axis.
-
+    
     Small non-physical inversions occasionally appear near the surface over
-    complex terrain and can collapse layer depths to ~0 m, which zeroes out the
+    complex terrain and can collapse layer depths to ~0 m, which zeros out the
     buoyancy integral. This helper nudges each level upward by the smallest
     amount needed to keep the profile strictly increasing without materially
     altering its shape.
     '''
-
+    
     hgt = np.asarray(height_m, dtype=float32)
     if hgt.ndim == 1:
-        if hgt.size == 0:
+        if hgt.ndim == 0:
             return hgt
         fixed = np.array(hgt, dtype=float32)
         for idx in range(1, fixed.size):
             if fixed[idx] <= fixed[idx - 1]:
                 fixed[idx] = fixed[idx - 1] + 1e-3
         return fixed
-
+    
     fixed = np.array(hgt, dtype=float32)
     nz = fixed.shape[0]
     for lvl in range(1, nz):
@@ -120,30 +120,30 @@ def _enforce_monotonic_height(height_m: np.ndarray) -> np.ndarray:
 def _integrate_positive_buoyancy(height_m: np.ndarray, buoyancy: np.ndarray) -> float:
     '''
     Integrate positive buoyancy (J/kg) using zero-crossing interpolation.
-
+    
     The integration assumes the inputs are 1-D profiles with matching shapes.
     '''
-
+    
     hgt = np.asarray(height_m, dtype=float32)
     b = np.asarray(buoyancy, dtype=float32)
     valid = np.isfinite(hgt) & np.isfinite(b)
     if valid.sum() < 2:
         return np.nan
-
+    
     hgt = hgt[valid]
     b = b[valid]
-
+    
     order = np.argsort(hgt)
     hgt = _enforce_monotonic_height(hgt[order])
     b = b[order]
-
+    
     energy = 0.0
     for idx in range(b.size - 1):
         b0 = b[idx]
         b1 = b[idx + 1]
         h0 = hgt[idx]
         h1 = hgt[idx + 1]
-
+        
         if b0 >= 0.0 and b1 >= 0.0:
             energy += 0.5 * (b0 + b1) * (h1 - h0)
         elif b0 >= 0.0 > b1:
@@ -154,7 +154,7 @@ def _integrate_positive_buoyancy(height_m: np.ndarray, buoyancy: np.ndarray) -> 
             frac = b1 / np.clip(b1 - b0, 1e-6, None)
             h_cross = h0 + frac * (h1 - h0)
             energy += 0.5 * b1 * (h1 - h_cross)
-
+    
     return float(np.clip(energy, 0.0, None))
 
 def _surface_based_cape_profile(
@@ -219,7 +219,7 @@ def _surface_based_cape_profile(
     hgt = hgt[sort_h]
     vt_env_k = vt_env_k[sort_h]
     vt_parcel_k = vt_parcel_k[sort_h]
-
+    
     with np.errstate(divide='ignore', invalid='ignore'):
         buoyancy = G0 * (vt_parcel_k - vt_env_k) / np.clip(vt_env_k, 1e-6, None)
     return _integrate_positive_buoyancy(hgt, buoyancy)
@@ -469,26 +469,26 @@ def _surface_based_cape_profiles_vectorized(
     mixing_ratio = np.full_like(parcel_temps_k, np.nan, dtype=float32)
     if dry_mask.any():
         mixing_ratio[dry_mask] = np.broadcast_to(surf_r, dry_mask.shape)[dry_mask]
-
+    
     sat_mr = saturation_mixing_ratio(pres[:, column_valid] * 100.0, parcel_temps_k)
     moist_mask = ~dry_mask & np.isfinite(parcel_temps_k)
     if moist_mask.any():
         mixing_ratio[moist_mask] = sat_mr[moist_mask]
-
+    
     parcel_virtual_k = virtual_temperature(parcel_temps_k, mixing_ratio)
     env_mixing_ratio = _mixing_ratio_from_dewpoint(pres[:, column_valid], dew_c[:, column_valid])
     env_virtual_k = virtual_temperature(temp_k[:, column_valid], env_mixing_ratio)
-
+    
     with np.errstate(divide='ignore', invalid='ignore'):
         buoyancy = G0 * (parcel_virtual_k - env_virtual_k) / np.clip(env_virtual_k, 1e-6, None)
-
+    
     hgt_col = _enforce_monotonic_height(hgt[:, column_valid])
     # Fast vectorized integration of positive buoyancy. Using trapz on clipped
     # buoyancy avoids a Python loop over every grid column and dramatically
     # reduces UI latency when the user requests SBCAPE fields.
     cape = np.trapz(np.clip(buoyancy, 0.0, None), hgt_col, axis=0)
     cape = np.clip(cape, 0.0, None)
-
+    
     result = np.full(ncol, np.nan, dtype=float32)
     result[column_valid] = cape
     return result
@@ -661,7 +661,7 @@ def parcel_thermo_indices_from_profile(
         start_temperature_c=start_temperature_c,
         start_dewpoint_c=start_dewpoint_c,
     )
-
+    
     # Normalize profiles to surface-first order before rebuilding heights so
     # parcels starting aloft keep the correct AGL reference instead of being
     # re-anchored to 0 m at their start level.
@@ -672,10 +672,10 @@ def parcel_thermo_indices_from_profile(
     hgt = hgt[order]
     vt_env_c = vt_env_c[order]
     vt_parcel_c = vt_parcel_c[order]
-
+    
     vt_env_k = vt_env_c + 273.15
     vt_parcel_k = vt_parcel_c + 273.15
-
+    
     # Rebuild a smooth, monotonic AGL height profile directly from the
     # hypsometric equation so equilibrium-level searches use physically
     # consistent layer depths even when raw model heights contain noise or
@@ -686,13 +686,13 @@ def parcel_thermo_indices_from_profile(
         tv_bar = 0.5 * (vt_env_k[idx - 1] + vt_env_k[idx])
         dp_ratio = np.log(np.clip(pres[idx - 1] / pres[idx], 1e-6, None))
         hgt_agl[idx] = hgt_agl[idx - 1] + (RD / G0) * tv_bar * dp_ratio
-
+    
     hgt_agl = _enforce_monotonic_height(hgt_agl)
-
+    
     valid_vt = np.isfinite(vt_env_k) & np.isfinite(vt_parcel_k) & np.isfinite(hgt_agl)
     if valid_vt.sum() < 2:
         return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
-
+    
     pres = pres[valid_vt]
     vt_env_k = vt_env_k[valid_vt]
     vt_parcel_k = vt_parcel_k[valid_vt]
@@ -702,11 +702,11 @@ def parcel_thermo_indices_from_profile(
     
     with np.errstate(divide='ignore', invalid='ignore'):
         buoyancy = G0 * (vt_parcel_k - vt_env_k) / np.clip(vt_env_k, 1e-6, None)
-
+    
     buoyancy = np.asarray(buoyancy, dtype=float32)
     if not np.isfinite(buoyancy).any():
         return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
-
+    
     def _zero_cross_height(h0: float, h1: float, b0: float, b1: float) -> float:
         denom = b1 - b0
         if abs(denom) < 1e-6:
@@ -742,7 +742,7 @@ def parcel_thermo_indices_from_profile(
             hgt[lfc_idx - 1], hgt[lfc_idx], buoyancy[lfc_idx - 1], buoyancy[lfc_idx]
         )
         lfc_buoy = 0.0
-
+    
     if np.isfinite(lcl_height):
         if lcl_height > lfc_height:
             lfc_buoy = 0.0
@@ -754,11 +754,11 @@ def parcel_thermo_indices_from_profile(
     # the parcel quickly re-enters a buoyant layer aloft.
     pos_after_lfc = np.where((np.arange(buoyancy.size) >= lfc_idx) & (buoyancy > 0.0))[0]
     last_pos_idx = int(pos_after_lfc[-1])
-
+    
     el_idx = None
     el_height = np.nan
     el_buoy = np.nan
-
+    
     # Prefer the first zero-crossing *after the final* positive layer, which
     # better matches the conceptual "top" of the final buoyant plume when the
     # profile briefly dips negative and recovers aloft. Starting the search at
@@ -772,7 +772,7 @@ def parcel_thermo_indices_from_profile(
             el_buoy = 0.0
             el_idx = idx + 1
             break
-
+    
     if el_idx is None:
         el_candidates = np.where((np.arange(buoyancy.size) > last_pos_idx) & (buoyancy <= 0.0))[0]
         if el_candidates.size:
@@ -783,11 +783,11 @@ def parcel_thermo_indices_from_profile(
             el_idx = buoyancy.size - 1
             el_height = hgt[-1]
             el_buoy = buoyancy[-1]
-
+    
     cinh_h = np.concatenate([hgt[:lfc_idx], [lfc_height]])
     cinh_b = np.concatenate([buoyancy[:lfc_idx], [0.0]])
     cinh = np.trapz(np.clip(cinh_b, None, 0.0), cinh_h)
-
+    
     cape_h = np.concatenate([[lfc_height], hgt[lfc_idx + 1:el_idx], [el_height]])
     cape_b = np.concatenate([[lfc_buoy], buoyancy[lfc_idx + 1:el_idx], [el_buoy]])
     cape = _integrate_positive_buoyancy(cape_h, cape_b)
@@ -806,7 +806,7 @@ def parcel_thermo_indices_from_profile(
     
     lfc_height_final = lfc_height if np.isfinite(lfc_height) else np.nan
     el_height_final = el_height if np.isfinite(el_height) else np.nan
-
+    
     if np.isfinite(el_height_final) and el_height_final < 0.0:
         el_height_final = np.nan
     
@@ -817,7 +817,7 @@ def parcel_thermo_indices_from_profile(
         cape = 0.0
         cinh = 0.0
         return cape, cinh, np.nan, np.nan, np.nan, np.nan
-
+    
     return cape, cinh, lcl_height, lfc_height_final, el_height_final, li
     
 
