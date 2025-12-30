@@ -722,26 +722,51 @@ def parcel_thermo_indices_from_profile(
     lfc_search_idx = 0
     if np.isfinite(lcl_height):
         lfc_search_idx = int(np.searchsorted(hgt, lcl_height, side='left'))
-    
-    # Locate the first level of positive buoyancy (LFC) to bound CINH to the
-    # layer the parcel must lift through. If no positive buoyancy exists, CAPE
-    # is zero and CINH is simply the integrated negative buoyancy of the
-    # profile.
-    positive_idx = np.where((np.arange(buoyancy.size) >= lfc_search_idx) & (buoyancy > 0.0))[0]
-    if positive_idx.size == 0:
-        # No positive buoyancy means the parcel never becomes unstable. Treat the
-        # profile as zero CAPE/zero CINH instead of letting deep cold layers
-        # integrate large negative buoyancy.
-        return 0.0, 0.0, np.nan, np.nan, np.nan, np.nan
-    
-    lfc_idx = int(positive_idx[0])
-    lfc_height = hgt[lfc_idx]
-    lfc_buoy = buoyancy[lfc_idx]
-    if lfc_idx > 0 and buoyancy[lfc_idx - 1] <= 0.0:
-        lfc_height = _zero_cross_height(
-            hgt[lfc_idx - 1], hgt[lfc_idx], buoyancy[lfc_idx - 1], buoyancy[lfc_idx]
-        )
+
+    # Anchor the LFC search to the *top* of the CINH layer so free convection
+    # begins immediately above inhibition instead of within it. This chooses
+    # the highest non-positive layer that still has positive buoyancy aloft,
+    # ensuring the LFC cannot fall inside the CINH layer when buoyancy briefly
+    # spikes positive near the surface and turns negative again above.
+    pos_indices = np.where(buoyancy > 0.0)[0]
+    if pos_indices.size == 0:
+        # No positive buoyancy means the parcel never becomes unstable. CAPE is
+        # zero, but CINH should still reflect the negative buoyancy the parcel
+        # would need to overcome. Integrate the available profile so deeply
+        # stable soundings no longer report zero CINH.
+        cinh = float(np.trapz(np.clip(buoyancy, None, 0.0), hgt))
+        return 0.0, cinh, lcl_height, np.nan, np.nan, np.nan
+
+    last_pos_idx = int(pos_indices[-1])
+    candidate_nonpos = np.where((np.arange(buoyancy.size) >= lfc_search_idx) & (buoyancy <= 0.0))[0]
+    lfc_anchor_idx = lfc_search_idx
+    for idx in candidate_nonpos[::-1]:
+        if (buoyancy[idx + 1:] > 0.0).any():
+            lfc_anchor_idx = int(idx)
+            break
+
+    # Locate the first level of positive buoyancy (LFC) above the CINH top so
+    # CINH is always entirely below the LFC.
+    pos_after_anchor = np.where((np.arange(buoyancy.size) > lfc_anchor_idx) & (buoyancy > 0.0))[0]
+    if pos_after_anchor.size == 0:
+        # Guard against a profile where the only positive layer lies exactly at
+        # the anchor level by falling back to the last detected positive layer.
+        pos_after_anchor = np.array([last_pos_idx], dtype=int)
+
+    lfc_idx = None
+    lfc_height = np.nan
+    lfc_buoy = np.nan
+
+    first_pos_idx = int(pos_after_anchor[0])
+    if buoyancy[lfc_anchor_idx] <= 0.0 and buoyancy[first_pos_idx] > 0.0:
+        lfc_idx = first_pos_idx
+        lfc_height = _zero_cross_height(hgt[lfc_anchor_idx], hgt[lfc_idx], buoyancy[lfc_anchor_idx], buoyancy[lfc_idx])
         lfc_buoy = 0.0
+
+    if lfc_idx is None:
+        lfc_idx = first_pos_idx
+        lfc_height = hgt[lfc_idx]
+        lfc_buoy = buoyancy[lfc_idx]
     
     if np.isfinite(lcl_height):
         if lcl_height > lfc_height:
@@ -784,9 +809,27 @@ def parcel_thermo_indices_from_profile(
             el_height = hgt[-1]
             el_buoy = buoyancy[-1]
     
-    cinh_h = np.concatenate([hgt[:lfc_idx], [lfc_height]])
-    cinh_b = np.concatenate([buoyancy[:lfc_idx], [0.0]])
-    cinh = np.trapz(np.clip(cinh_b, None, 0.0), cinh_h)
+    # Integrate all negative buoyancy the parcel must overcome on its ascent
+    # from the surface to the EL. This ensures inhibition above a shallow LFC is
+    # still represented instead of truncating the integral near the surface.
+    cinh_h = []
+    cinh_b = []
+
+    if lfc_idx > 0:
+        cinh_h.extend(hgt[:lfc_idx])
+        cinh_b.extend(buoyancy[:lfc_idx])
+
+    cinh_h.append(lfc_height)
+    cinh_b.append(0.0)
+
+    if el_idx > lfc_idx + 1:
+        cinh_h.extend(hgt[lfc_idx + 1:el_idx])
+        cinh_b.extend(buoyancy[lfc_idx + 1:el_idx])
+
+    cinh_h.append(el_height)
+    cinh_b.append(el_buoy)
+
+    cinh = np.trapz(np.clip(np.asarray(cinh_b, dtype=float32), None, 0.0), np.asarray(cinh_h, dtype=float32))
     
     cape_h = np.concatenate([[lfc_height], hgt[lfc_idx + 1:el_idx], [el_height]])
     cape_b = np.concatenate([[lfc_buoy], buoyancy[lfc_idx + 1:el_idx], [el_buoy]])
