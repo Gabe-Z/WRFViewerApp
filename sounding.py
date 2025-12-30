@@ -93,7 +93,7 @@ class SoundingWindow(QMainWindow):
         parcel_label = QLabel('Parcel:')
         parcel_label.setStyleSheet('color: white; font-size: 15px; font-weight: 600;')
         header.addWidget(parcel_label)
-
+        
         self._parcel_combo = QComboBox()
         self._parcel_combo.addItems(
             ['Surface-Based', 'Most Unstable', 'Mixed-Layer']
@@ -105,7 +105,7 @@ class SoundingWindow(QMainWindow):
         )
         self._parcel_combo.currentTextChanged.connect(self._on_parcel_selection_changed)
         header.addWidget(self._parcel_combo)
-
+        
         title_label = QLabel(self._window_title_text)
         title_label.setStyleSheet('color: white; font-size: 18px; font-weight: 600;')
         header.addWidget(title_label)
@@ -145,9 +145,9 @@ class SoundingWindow(QMainWindow):
         self._parcel_label_widgets: dict[str, QLabel] = {}
         self._parcel_artists = []
         self._parcel_data: dict[str, dict[str, float | None]] = {}
-
+        
         self._draw_background()
-
+        
         if pressure_profile_hpa is not None and temperature_profile_c is not None:
             self._plot_temperature_profile(pressure_profile_hpa, temperature_profile_c)
         if (
@@ -177,7 +177,7 @@ class SoundingWindow(QMainWindow):
             self._add_parcel_indices_section(
                 pressure_profile_hpa, temperature_profile_c, dewpoint_profile_c, height_profile_m
             )
-
+        
         self._on_parcel_selection_changed(self._parcel_combo.currentText())
     
     def _export_sounding(self) -> None:
@@ -341,16 +341,16 @@ class SoundingWindow(QMainWindow):
         if not unstable or not np.isfinite(value):
             return 'N/A'
         return f'{value:.1f}'
-
+    
     def _selected_parcel_key(self) -> str:
         combo = getattr(self, '_parcel_combo', None)
         if combo is None:
             return 'Surface-Based'
         return combo.currentText() or 'Surface-Based'
-
+    
     def _parcel_is_buoyant(self, parcel: dict[str, float | None]) -> bool:
         return np.isfinite(parcel.get('cape', np.nan)) and parcel.get('cape', 0.0) > 10.0
-
+    
     def _clear_parcel_artists(self) -> None:
         for artist in self._parcel_artists:
             try:
@@ -359,13 +359,13 @@ class SoundingWindow(QMainWindow):
                 continue
         self._parcel_artists = []
         self.figure.canvas.draw_idle()
-
+    
     def _update_parcel_row_styles(self) -> None:
         selected_key = self._selected_parcel_key()
         for key, widget in self._parcel_label_widgets.items():
             color = 'yellow' if key == selected_key else 'white'
             widget.setStyleSheet(f'color: {color}; font-size: 13px; font-weight: 600;')
-
+    
     def _compute_parcel_data(
         self,
         pressure_hpa: np.ndarray,
@@ -375,11 +375,11 @@ class SoundingWindow(QMainWindow):
     ) -> dict[str, dict[str, float | None]]:
         if height_m is None:
             return {}
-
+        
         sb_cape, sb_cinh, sb_lcl, sb_lfc, sb_el, sb_li = parcel_thermo_indices_from_profile(
             pressure_hpa, temperature_c, dewpoint_c, height_m
         )
-
+        
         mu_p, mu_temp, mu_dew = most_unstable_parcel_source(
             pressure_hpa, temperature_c, dewpoint_c
         )
@@ -392,7 +392,7 @@ class SoundingWindow(QMainWindow):
             start_temperature_c=mu_temp if np.isfinite(mu_temp) else None,
             start_dewpoint_c=mu_dew if np.isfinite(mu_dew) else None,
         )
-
+        
         ml_p, ml_temp, ml_dew = mixed_layer_parcel_source(
             pressure_hpa, temperature_c, dewpoint_c
         )
@@ -405,7 +405,7 @@ class SoundingWindow(QMainWindow):
             start_temperature_c=ml_temp if np.isfinite(ml_temp) else None,
             start_dewpoint_c=ml_dew if np.isfinite(ml_dew) else None,
         )
-
+        
         return {
             'Surface-Based': {
                 'label': 'SFC',
@@ -442,7 +442,7 @@ class SoundingWindow(QMainWindow):
                 'start_pressure': ml_p if np.isfinite(ml_p) else None,
                 'start_temperature': ml_temp if np.isfinite(ml_temp) else None,
                 'start_dewpoint': ml_dew if np.isfinite(ml_dew) else None,
-            },
+            }
         }
     
     def _add_parcel_row(
@@ -531,16 +531,16 @@ class SoundingWindow(QMainWindow):
             self._parcel_data = self._compute_parcel_data(
                 pressure_hpa, temperature_c, dewpoint_c, height_m
             )
-
+        
         parcels = self._parcel_data
         sb = parcels.get('Surface-Based', {})
         mu = parcels.get('Most Unstable', {})
         ml = parcels.get('Mixed-Layer', {})
-
+        
         unstable = any(self._parcel_is_buoyant(parcel) for parcel in parcels.values())
-
+        
         selected_key = self._selected_parcel_key()
-
+        
         self._add_parcel_row(
             section,
             1,
@@ -583,7 +583,7 @@ class SoundingWindow(QMainWindow):
             highlight=selected_key == 'Mixed-Layer',
             key='Mixed-Layer',
         )
-
+        
         # Align the parcel indices with the Skew-T's y-axis by offsetting the
         # widget by the axes' left position within the canvas.
         self.canvas.draw()
@@ -596,11 +596,11 @@ class SoundingWindow(QMainWindow):
         row.addSpacing(left_pad)
         row.addWidget(container, alignment=Qt.AlignLeft | Qt.AlignTop)
         row.addStretch(1)
-
+        
         self.centralWidget().layout().addLayout(row)
-
+        
         self._update_parcel_row_styles()
-
+    
     def _pressure_from_height(self, height_m: float) -> float:
         converter = getattr(self, '_pressure_from_profile', None)
         if converter is not None:
@@ -617,13 +617,13 @@ class SoundingWindow(QMainWindow):
             ('LFC', lfc_height_m, 'yellow', 'bottom'),
             ('EL', el_height_m, 'purple', 'bottom'),
         )
-
+        
         x_center = 40.0
         half_width = 0.8
         offset_px = 6.0 / self.figure.dpi
-
+        
         artists = []
-
+        
         for label, height_m, color, valign in level_info:
             if not np.isfinite(height_m):
                 continue
@@ -660,10 +660,10 @@ class SoundingWindow(QMainWindow):
                 zorder=8,
             )
             artists.extend((line, text))
-
+        
         self.figure.canvas.draw_idle()
         return artists
-
+    
     def _on_parcel_selection_changed(self, _: str) -> None:
         if (
             not self._parcel_data
@@ -672,17 +672,17 @@ class SoundingWindow(QMainWindow):
             or self._dewpoint_profile_c is None
         ):
             return
-
+        
         self._update_parcel_row_styles()
         self._clear_parcel_artists()
-
+        
         parcel = self._parcel_data.get(self._selected_parcel_key())
         if not parcel:
             return
-
+        
         if not self._parcel_is_buoyant(parcel):
             return
-
+        
         line = self._plot_parcel_trace(
             self._pressure_profile_hpa,
             self._temperature_profile_c,
@@ -695,7 +695,7 @@ class SoundingWindow(QMainWindow):
         )
         if line is not None:
             self._parcel_artists.append(line)
-
+        
         markers = self._add_parcel_level_markers(
             parcel.get('lcl', np.nan),
             parcel.get('lfc', np.nan),
@@ -937,7 +937,7 @@ class SoundingWindow(QMainWindow):
             pressure_hpa[valid],
             aspect_correction=getattr(self, '_aspect_correction', 1.0),
         )
-
+        
         line = self.ax.plot(
             skewed_temps,
             pressure_hpa[valid],
