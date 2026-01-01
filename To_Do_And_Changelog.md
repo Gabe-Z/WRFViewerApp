@@ -4,6 +4,7 @@
 	- [ ] (Low Priority) Fix mercator projection resulting in calculating UH threshold to be off.
 	- [ ] Add PW, DCAPE, 3CAPE to the Thermodyanmic Indices.
 	- [ ] Plot effective inflow layer onto the Skew-T chart.
+	- [ ] Change info/time label to center below the plot rather than lower-left.
 	- [ ] And much more.
 
 # Version: 0.1.0 Alpha
