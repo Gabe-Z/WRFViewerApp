@@ -2,6 +2,11 @@
 
 Currently a work in progress and not intended for public uses. You will need to install the runtime libraries the scripts requires before running them.
 
+For easier way to download without compiling:
+	Go to Download Folder
+	WARNING: The file size is 238 mb due to all of the libraries and packages being included with it.
+	Also include Colortable folder in the same path as WRF_Viewer_App.exe.
+
 ## Required Python packages
 The scripts import the following packages:
 `numpy`
