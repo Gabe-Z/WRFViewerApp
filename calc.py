@@ -7,6 +7,8 @@ from netCDF4 import Dataset
 from numpy import float32
 from wrf import interplevel, rh, to_np
 
+
+
 # Thermodynamic constants
 RD = 287.05 # J/(kg*K)
 CP = 1004.0 # J/(kg*K)
@@ -21,6 +23,252 @@ PTYPE_MAX_RATE_INHR = 5.0
 PTYPE_RATE_BREAKS_INHR = np.array(
     [0.0, 0.01, 0.05, 0.25, 0.5, 1.0, 2.5, PTYPE_MAX_RATE_INHR], dtype=float32
 )
+
+
+def wind_components_from_direction_speed(
+    wind_direction_deg: np.ndarray | float, wind_speed_ms: np.ndarray | float
+) -> tuple[np.ndarray, np.ndarray]:
+    '''
+    Convert meteorological wind direction (deg from) and speed (m/s) to u/v components (m/s).
+    
+    The returned components follow the conventional sign where positive ``u``
+    points east and positive ``v`` points north.
+    '''
+    
+    wdir = np.asarray(wind_direction_deg, dtype=float32)
+    wspd = np.asarray(wind_speed_ms, dtype=float32)
+    direction_rad = np.deg2rad(wdir)
+    u = -wspd * np.sin(direction_rad)
+    v = -wspd * np.cos(direction_rad)
+    return u, v
+
+
+def _layer_mean_wind_components(
+    height_m: np.ndarray, u_comp: np.ndarray, v_comp: np.ndarray, bottom_m: float, top_m: float
+) -> tuple[float, float]:
+    ''' Mean u/v components within [bottom_m, top_m] AGL '''
+    
+    hgt = np.asarray(height_m, dtype=float32)
+    u = np.asarray(u_comp, dtype=float32)
+    v = np.asarray(v_comp, dtype=float32)
+    
+    valid = np.isfinite(hgt) & np.isfinite(u) & np.isfinite(v)
+    if valid.sum() < 2:
+        return np.nan, np.nan
+    
+    hgt = hgt[valid]
+    u = u[valid]
+    v = v[valid]
+    
+    order = np.argsort(hgt)
+    hgt_sorted = hgt[order]
+    u_sorted = u[order]
+    v_sorted = v[order]
+    
+    if top_m > hgt_sorted[-1]:
+        return np.nan, np.nan
+    
+    interp_bottom_u = float(np.interp(bottom_m, hgt_sorted, u_sorted))
+    interp_bottom_v = float(np.interp(bottom_m, hgt_sorted, v_sorted))
+    interp_top_u = float(np.interp(top_m, hgt_sorted, u_sorted))
+    interp_top_v = float(np.interp(top_m, hgt_sorted, v_sorted))
+    
+    within = (hgt_sorted >= bottom_m) & (hgt_sorted <= top_m)
+    sample_h = np.concatenate(([bottom_m], hgt_sorted[within], [top_m]))
+    sample_u = np.concatenate(([interp_bottom_u], u_sorted[within], [interp_top_u]))
+    sample_v = np.concatenate(([interp_bottom_v], v_sorted[within], [interp_top_v]))
+    
+    if sample_h.size < 2:
+        return np.nan, np.nan
+    
+    return float(np.nanmean(sample_u)), float(np.nanmean(sample_v))
+
+
+def bunkers_storm_motion(
+    height_m: np.ndarray, wind_direction_deg: np.ndarray, wind_speed_ms: np.ndarray
+) -> dict[str, tuple[float, float]]:
+    '''
+    Compute Bunkers storm motions (m/s) for left-, mean-, and right-movers.
+    
+    Returns a mapping with ``LM``, ``MW``, and ``RM`` keys pointing to
+    (u, v) tuples in m/s. Values are ``(nan, nan)`` when inputs are
+    insufficient for the calculation.
+    '''
+    
+    hgt = np.asarray(height_m, dtype=float32)
+    wdir = np.asarray(wind_direction_deg, dtype=float32)
+    wspd = np.asarray(wind_speed_ms, dtype=float32)
+    
+    valid = (
+        np.isfinite(hgt)
+        & np.isfinite(wdir)
+        & np.isfinite(wspd)
+        & (hgt >= 0.0)
+        & (hgt <= 20000.0)
+        & (wspd <= 200.0)
+    )
+    if valid.sum() < 2:
+        return {'LM': (np.nan, np.nan), 'MW': (np.nan, np.nan), 'RM': (np.nan, np.nan)}
+    
+    hgt = hgt[valid]
+    wdir = np.mod(wdir[valid], 360.0)
+    wspd = wspd[valid]
+    
+    order = np.argsort(hgt)
+    hgt = hgt[order]
+    wdir = wdir[order]
+    wspd = wspd[order]
+    
+    u, v = wind_components_from_direction_speed(wind_direction_deg=wdir, wind_speed_ms=wspd)
+    
+    mean_u, mean_v = _layer_mean_wind_components(hgt, u, v, 0.0, 6000.0)
+    lower_u, lower_v = _layer_mean_wind_components(hgt, u, v, 0.0, 500.0)
+    upper_u, upper_v = _layer_mean_wind_components(hgt, u, v, 5500.0, 6000.0)
+    
+    motions = {'LM': (np.nan, np.nan), 'MW': (mean_u, mean_v), 'RM': (np.nan, np.nan)}
+    if not (np.isfinite(mean_u) and np.isfinite(mean_v) and np.isfinite(lower_u) and np.isfinite(lower_v) and np.isfinite(upper_u) and np.isfinite(upper_v)):
+        #
+        return motions
+    
+    shear_u = upper_u - lower_u
+    shear_v = upper_v - lower_v
+    shear_mag = math.hypot(shear_u, shear_v)
+    if shear_mag < 1e-6:
+        return motions
+    
+    dev = 7.5
+    right_unit = (shear_v / shear_mag, -shear_u / shear_mag)
+    left_unit = (-shear_v / shear_mag, shear_u / shear_mag)
+    
+    motions['RM'] = (mean_u + dev * right_unit[0], mean_v + dev * right_unit[1])
+    motions['LM'] = (mean_u + dev * left_unit[0], mean_v + dev * left_unit[1])
+    return motions
+
+
+def pressure_weighted_mean_wind_components(
+    height_m: np.ndarray,
+    pressure_hpa: np.ndarray,
+    wind_direction_deg: np.ndarray,
+    wind_speed_ms: np.ndarray,
+    bottom_m: float,
+    top_m: float,
+) -> tuple[float, float]:
+    '''
+    Pressure-weighted mean wind components (m/s) between ``bottom_m`` and ``top_m`` AGL.
+    
+    Uses trapezoidal integration of u/v components over pressure thickness. Returns
+    ``(nan, nan)`` when valid data do not span the requested layer.
+    '''
+    
+    hgt = np.asarray(height_m, dtype=float32)
+    pres = np.asarray(pressure_hpa, dtype=float32)
+    wdir = np.asarray(wind_direction_deg, dtype=float32)
+    wspd = np.asarray(wind_speed_ms, dtype=float32)
+    
+    valid = np.isfinite(hgt) & np.isfinite(pres) & np.isfinite(wdir) & np.isfinite(wspd)
+    if valid.sum() < 2:
+        return np.nan, np.nan
+    
+    hgt = hgt[valid]
+    pres = pres[valid]
+    wdir = np.mod(wdir[valid], 360.0)
+    wspd = wspd[valid]
+    
+    order = np.argsort(hgt)
+    hgt = hgt[order]
+    pres = pres[order]
+    wdir = wdir[order]
+    wspd = wspd[order]
+    
+    if hgt[0] > bottom_m or hgt[-1] < top_m:
+        return np.nan, np.nan
+    
+    u, v = wind_components_from_direction_speed(wdir, wspd)
+    bottom_p = float(np.interp(bottom_m, hgt, pres))
+    top_p = float(np.interp(top_m, hgt, pres))
+    bottom_u = float(np.interp(bottom_m, hgt, u))
+    bottom_v = float(np.interp(bottom_m, hgt, v))
+    top_u = float(np.interp(top_m, hgt, u))
+    top_v = float(np.interp(top_m, hgt, v))
+    
+    within = (hgt >= bottom_m) & (hgt <= top_m)
+    sample_h = np.concatenate(([bottom_m], hgt[within], [top_m]))
+    sample_p = np.concatenate(([bottom_p], pres[within], [top_p]))
+    sample_u = np.concatenate(([bottom_u], u[within], [top_u]))
+    sample_v = np.concatenate(([bottom_v], v[within], [top_v]))
+    
+    if sample_h.size < 2:
+        return np.nan, np.nan
+    
+    total_dp = 0.0
+    accum_u = 0.0
+    accum_v = 0.0
+    for i in range(sample_h.size - 1):
+        dp = sample_p[i] - sample_p[i + 1]
+        if abs(dp) < 1e-4:
+            continue
+        seg_u = 0.5 * (sample_u[i] + sample_u[i + 1])
+        seg_v = 0.5 * (sample_v[i] + sample_v[i + 1])
+        accum_u += seg_u * dp
+        accum_v += seg_v * dp
+        total_dp += dp
+    
+    if abs(total_dp) < 1e-4:
+        return np.nan, np.nan
+    
+    mean_u = accum_u / total_dp
+    mean_v = accum_v / total_dp
+    return float(mean_u), float(mean_v)
+
+
+def storm_relative_wind_components(
+    u_wind: np.ndarray, v_wind: np.ndarray, storm_u: float, storm_v: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    ''' Subtract storm motion from ground-relative components.'''
+
+    u = np.asarray(u_wind, dtype=float32)
+    v = np.asarray(v_wind, dtype=float32)
+    return u - storm_u, v - storm_v
+
+
+def wind_components_at_height(
+    height_m: np.ndarray, wind_direction_deg: np.ndarray , wind_speed_ms: np.ndarray, target_height_m: float
+) -> tuple[float, float]:
+    ''' Interpolate u/v components (m/s) at ``target_height_m`` AGL.'''
+    
+    u, v = wind_components_from_direction_speed(wind_direction_deg, wind_speed_ms)
+    hgt = np.asarray(height_m, dtype=float32)
+    valid = np.isfinite(hgt) & np.isfinite(u) & np.isfinite(v)
+    if valid.sum() < 2:
+        return np.nan, np.nan
+    
+    hgt = hgt[valid]
+    u = u[valid]
+    v = v[valid]
+    
+    order = np.argsort(hgt)
+    hgt_sorted = hgt[order]
+    u_sorted = u[order]
+    v_sorted = v[order]
+    
+    if target_height_m < hgt_sorted[0] or target_height_m > hgt_sorted[-1]:
+        return np.nan
+    
+    u_interp = float(np.interp(target_height_m, hgt_sorted, u_sorted))
+    v_interp = float(np.interp(target_height_m, hgt_sorted, v_sorted))
+    return u_interp, v_interp
+
+
+def shear_vector(
+    height_m: np.ndarray, wind_direction_deg: np.ndarray, wind_speed_ms: np.ndarray, bottom_m: float, top_m: float
+) -> float[float, float]:
+    ''' Vector shear (m/s) between ``bottom_m`` and ``top_m`` AGL.'''
+    
+    low_u, low_v = wind_components_at_height(height_m, wind_direction_deg, wind_speed_ms, bottom_m)
+    high_u, high_v = wind_components_at_height(height_m, wind_direction_deg, wind_speed_ms, top_m)
+    if not (np.isfinite(low_u) and np.isfinite(low_v) and np.isfinite(high_u) and np.isfinite(high_v)):
+        return np.nan, np.nan
+    return high_u - low_u, high_v - low_v
 
 
 def _saturation_water_pressure_pa(temp_c: float | np.ndarray) -> np.ndarray:
@@ -892,6 +1140,87 @@ def parcel_cape_cinh_from_profile(
     return cape, cin
 
 
+def effective_inflow_layer(
+    pressure_hpa: np.ndarray, temperature_c: np.ndarray, dewpoint_c: np.ndarray, height_m: np.ndarray
+) -> tuple[float, float]:
+    '''
+    Effective inflow layer base/top heights (m AGL) using CAPE/CINH thresholds.
+    
+    The lowest level with CAPE > 100 J/kg and CINH > -250 J/kg defines the base;
+    the top is the highest contigous level that still meets the criteria.
+    Return ``(nan, nan)`` when inputs are sufficient.
+    '''
+    
+    pres = np.asarray(pressure_hpa, dtype=float32)
+    temp_c = np.asarray(temperature_c, dtype=float32)
+    dew_c = np.asarray(dewpoint_c, dtype=float32)
+    hgt = np.asarray(height_m, dtype=float32)
+    
+    valid = np.isfinite(pres) & np.isfinite(temp_c) & np.isfinite(dew_c) & np.isfinite(hgt)
+    if valid.sum() < 3:
+        return np.nan, np.nan
+    
+    pres = pres[valid]
+    temp_c = temp_c[valid]
+    dew_c = dew_c[valid]
+    hgt = hgt[valid]
+    
+    order = np.argsort(pres)[::-1]
+    pres_sorted = pres[order]
+    temp_sorted = temp_c[order]
+    dew_sorted = dew_c[order]
+    hgt_sorted = hgt[order]
+    
+    base_height = np.nan
+    top_height = np.nan
+    
+    for start_idx in range(pres_sorted.size):
+        start_p = float(pres_sorted[start_idx])
+        start_t = float(temp_sorted[start_idx])
+        start_d = float(dew_sorted[start_idx])
+        
+        cape, cin, *_ = parcel_thermo_indices_from_profile(
+            pres_sorted,
+            temp_sorted,
+            dew_sorted,
+            hgt_sorted,
+            start_pressure_hpa=start_p,
+            start_temperature_c=start_t,
+            start_dewpoint_c=start_d,
+            presorted=True,
+        )
+        
+        if not (np.isfinite(cape) and np.isfinite(cin)):
+            continue
+        
+        if cape > 100.0 and cin > -250.0:
+            base_height = float(hgt_sorted[start_idx])
+            top_height = base_height
+            for top_idx in range(start_idx, pres_sorted.size):
+                top_p = float(pres_sorted[top_idx])
+                top_t = float(temp_sorted[top_idx])
+                top_d = float(dew_sorted[top_idx])
+                top_cape, top_cin, *_ = parcel_thermo_indices_from_profile(
+                    pres_sorted,
+                    temp_sorted,
+                    dew_sorted,
+                    hgt_sorted,
+                    start_pressure_hpa=top_p,
+                    start_temperature_c=top_t,
+                    start_dewpoint_c=top_d,
+                    presorted=True,
+                )
+                if not (np.isfinite(top_cape) and np.isfinite(top_cin)):
+                    break
+                if top_cape > 100.0 and top_cin > -250.0:
+                    top_height = float(hgt_sorted[top_idx])
+                else:
+                    break
+            break
+    
+    return base_height, top_height
+
+
 def ptype_rate_offset(rate: np.ndarray | float) -> np.ndarray | float:
     '''Map precipitation rate (in/hr) to an intensity offset inside the band.'''
     
@@ -958,7 +1287,7 @@ def uh_minimum_for_spacing(dx_m: float | None, dy_m: float | None) -> float:
     if not np.isfinite(spacing_km) or spacing_km <= 0.0:
         return 75.0
     
-    return float(np.clip(75.0 / spacing_km, 1.0, None))
+    return float(np.clip(225.0 / spacing_km, 1.0, None))
 
 
 def calc_wind_gust_mph(nc: Dataset, time_index: int) -> np.ndarray:
@@ -1273,7 +1602,7 @@ def sounding_temperature_ticks(min_c: float = -50.0, max_c: float = 50.0, step_c
 
 
 def sounding_isotherm_temperatures(
-    min_c: float = -120.0, max_c: float = 50.0, step_c: float = 10.0
+    min_c: float = -150.0, max_c: float = 50.0, step_c: float = 10.0
 ) -> np.ndarray:
     ''' Temperature values used to draw skewed isotherm guidelines (C). '''
     
@@ -1303,7 +1632,7 @@ def sounding_pressure_bounds() -> tuple[float, float]:
 def sounding_skewed_isotherm(
     temp_c: np.ndarray | float,
     pressures: np.ndarray,
-    angle_deg: float = 45.0,
+    angle_deg: float = 35.0,
     aspect_correction: float = 1.0,
 ) -> np.ndarray:
     '''Return x-values for a skewed isotherm across the provided pressures.

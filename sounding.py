@@ -27,6 +27,9 @@ from calc import (
     mixed_layer_parcel_source,
     parcel_trace_temperature_profile,
     most_unstable_parcel_source,
+    bunkers_storm_motion,
+    effective_inflow_layer,
+    pressure_weighted_mean_wind_components,
     sounding_isotherm_temperatures,
     sounding_pressure_bounds,
     sounding_pressure_levels,
@@ -34,6 +37,10 @@ from calc import (
     sounding_temperature_bounds,
     sounding_temperature_ticks,
     virtual_temperature_profile,
+    storm_relative_wind_components,
+    wind_components_from_direction_speed,
+    wind_components_at_height,
+    shear_vector,
 )
 
 
@@ -106,6 +113,20 @@ class SoundingWindow(QMainWindow):
         self._parcel_combo.currentTextChanged.connect(self._on_parcel_selection_changed)
         header.addWidget(self._parcel_combo)
         
+        hodograph_label = QLabel('Hodograph:')
+        hodograph_label.setStyleSheet('color: white; font-size: 15px; font-weight: 600;')
+        header.addWidget(hodograph_label)
+        
+        self._hodograph_mode_combo = QComboBox()
+        self._hodograph_mode_combo.addItems(['Ground-Relative', 'Storm-Relative'])
+        self._hodograph_mode_combo.setMinimumContentsLength(16)
+        self._hodograph_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self._hodograph_mode_combo.setStyleSheet(
+            'color: black; background-color: white; border: 1px solid white; padding: 4px 6px;'
+        )
+        self._hodograph_mode_combo.currentTextChanged.connect(self._on_hodograph_mode_changed)
+        header.addWidget(self._hodograph_mode_combo)
+        
         title_label = QLabel(self._window_title_text)
         title_label.setStyleSheet('color: white; font-size: 18px; font-weight: 600;')
         header.addWidget(title_label)
@@ -126,14 +147,34 @@ class SoundingWindow(QMainWindow):
         header.addWidget(btn_exit)
         layout.addLayout(header)
         
-        self.figure, self.ax = plt.subplots(figsize=(10, 8))
+        self.figure = plt.figure(figsize=(12, 8))
         self.figure.patch.set_facecolor('black')
+        
+        grid = self.figure.add_gridspec(
+            nrows=1,
+            ncols=2,
+            width_ratios=[4.5, 3.5],
+            left=0.06,
+            right=0.98,
+            top=0.96,
+            bottom=0.08,
+            wspace=0.08,
+        )
+        
+        self.ax = self.figure.add_subplot(grid[0, 0])
         self.ax.set_facecolor('black')
+        self.ax.set_anchor('NW')
+        self.ax.set_box_aspect(1.0)
+        
+        self._hodograph_ax = self.figure.add_subplot(grid[0, 1])
+        self._hodograph_ax.set_facecolor('black')
+        self._hodograph_ax.set_anchor('NW')
+        self._resize_hodograph_axis()
+
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setStyleSheet('background-color: black;')
-        self.canvas.setMinimumSize(1000, 800)
-        self.canvas.setMaximumSize(1200, 950)
-        layout.addWidget(self.canvas, alignment=Qt.AlignLeft | Qt.AlignTop)
+        self.canvas.setMinimumSize(1020, 600)
+        layout.addWidget(self.canvas)
         
         self._pressure_profile_hpa = pressure_profile_hpa
         self._temperature_profile_c = temperature_profile_c
@@ -144,9 +185,28 @@ class SoundingWindow(QMainWindow):
         self._sbcape_jkg = sbcape_jkg
         self._parcel_label_widgets: dict[str, QLabel] = {}
         self._parcel_artists = []
+        self._hodograph_artist: list[object] = []
+        self._hodograph_range_ms = 60.0
+        self._hodograph_mode = 'Ground-Relative'
+        self._hodograph_profile: dict[str, np.ndarray] = {}
+        self._storm_relative_profile: dict[str, np.ndarray] = {}
+        self._storm_motion: dict[str, tuple[float, float]] = {}
+        self._effective_inflow_layer: tuple[float, float] = (np.nan, np.nan)
+        self._low_level_shear: tuple[float, float] = (np.nan, np.nan)
         self._parcel_data: dict[str, dict[str, float | None]] = {}
         
         self._draw_background()
+        self._init_hodograph_axes()
+        
+        if (
+            pressure_profile_hpa is not None
+            and temperature_profile_c is not None
+            and dewpoint_profile_c is not None
+            and height_profile_m is not None
+        ):
+            self._parcel_data = self._compute_parcel_data(
+                pressure_profile_hpa, temperature_profile_c, dewpoint_profile_c, height_profile_m
+            )
         
         if pressure_profile_hpa is not None and temperature_profile_c is not None:
             self._plot_temperature_profile(pressure_profile_hpa, temperature_profile_c)
@@ -161,13 +221,21 @@ class SoundingWindow(QMainWindow):
         if pressure_profile_hpa is not None and dewpoint_profile_c is not None:
             self._plot_dewpoint_profile(pressure_profile_hpa, dewpoint_profile_c)
         if (
-            pressure_profile_hpa is not None
-            and temperature_profile_c is not None
-            and dewpoint_profile_c is not None
+            height_profile_m is not None
+            and wind_direction_deg is not None
+            and wind_speed_ms is not None
         ):
-            self._parcel_data = self._compute_parcel_data(
-                pressure_profile_hpa, temperature_profile_c, dewpoint_profile_c, height_profile_m
+            self._compute_hodograph_diagnostics(
+                height_profile_m,
+                wind_direction_deg,
+                wind_speed_ms,
+                pressure_profile_hpa,
+                temperature_profile_c,
+                dewpoint_profile_c,
             )
+            self._plot_hodograph()
+        else:
+            self._hodograph_mode_combo.setEnabled(False)
         if (
             pressure_profile_hpa is not None
             and temperature_profile_c is not None
@@ -300,10 +368,93 @@ class SoundingWindow(QMainWindow):
         self.ax.xaxis.set_major_locator(MultipleLocator(10))
         self.ax.set_xlabel('Temperature (°C)', color='white', labelpad=12)
         self.ax.set_ylabel('Pressure (hPa)', color='white', labelpad=12)
-        
-        self.figure.tight_layout(rect=[0.04, 0.02, 0.98, 0.98])
+        self.ax.set_title('Skew-T Sounding', color='white', fontsize=12, pad=10)
         
         self._add_height_markers()
+    
+    def _resize_hodograph_axis(self, scale: float = 0.75) -> None:
+        if self._hodograph_ax is None:
+            return
+        
+        bbox = self._hodograph_ax.get_position()
+        scaled_width = bbox.width * scale
+        scaled_height = bbox.height * scale
+        new_x0 = bbox.x1 - scaled_width
+        new_y0 = bbox.y1 - scaled_height
+        self._hodograph_ax.set_position([new_x0, new_y0, scaled_width, scaled_height])
+    
+    def _init_hodograph_axes(self) -> None:
+        self._hodograph_ax.set_facecolor('black')
+        for spine in self._hodograph_ax.spines.values():
+            spine.set_color('white')
+        self._hodograph_ax.tick_params(color='white', labelcolor='white')
+        self._hodograph_ax.set_aspect('equal', adjustable='box')
+        self._hodograph_ax.set_xlim(-self._hodograph_range_ms, self._hodograph_range_ms)
+        self._hodograph_ax.set_ylim(-self._hodograph_range_ms, self._hodograph_range_ms)
+        self._hodograph_ax.set_xlabel('u (kt)', color='white')
+        self._hodograph_ax.set_ylabel('v (kt)', color='white')
+        self._hodograph_ax.set_title('Hodograph', color='white', fontsize=12, pad=10)
+        self._hodograph_ax.grid(True, color='#444444', linestyle='--', linewidth=0.8, alpha=0.7)
+        self._hodograph_ax.axhline(0.0, color='#666666', linewidth=1.0, zorder=1)
+        self._hodograph_ax.axvline(0.0, color='#666666', linewidth=1.0, zorder=1)
+        
+        rings = np.arange(10.0, self._hodograph_range_ms + 0.1, 10.0)
+        for radius in rings:
+            circle = plt.Circle(
+                (0.0, 0.0),
+                radius,
+                color='#5a5a5a',
+                fill=False,
+                linestyle=':',
+                linewidth=0.8,
+                alpha=0.8,
+                zorder=1,
+            )
+            self._hodograph_ax.add_artist(circle)
+            self._hodograph_ax.text(
+                radius - 3.5,
+                0.5,
+                f'{radius:.0f}',
+                color='white',
+                fontsize=8,
+                ha='left',
+                va='bottom',
+                alpha=0.9,
+                zorder=2,
+            )
+            self._hodograph_ax.text(
+                -radius,
+                0.5,
+                f'{radius:.0f}',
+                color='white',
+                fontsize=8,
+                ha='left',
+                va='bottom',
+                alpha=0.9,
+                zorder=2,
+            )
+            self._hodograph_ax.text(
+                0.5,
+                radius - 3.5,
+                f'{radius:.0f}',
+                color='white',
+                fontsize=8,
+                ha='left',
+                va='bottom',
+                alpha=0.9,
+                zorder=2,
+            )
+            self._hodograph_ax.text(
+                0.5,
+                -radius,
+                f'{radius:.0f}',
+                color='white',
+                fontsize=8,
+                ha='left',
+                va='bottom',
+                alpha=0.9,
+                zorder=2,
+            )
     
     def _cape_color(self, value: float) -> str:
         if not np.isfinite(value):
@@ -702,7 +853,22 @@ class SoundingWindow(QMainWindow):
             parcel.get('el', np.nan),
         )
         self._parcel_artists.extend(markers)
-    
+        
+        if (
+            self._height_profile_m is not None
+            and self._wind_direction_deg is not None
+            and self._wind_speed_ms is not None
+        ):
+            self._compute_hodograph_diagnostics(
+                self._height_profile_m,
+                self._wind_direction_deg,
+                self._wind_speed_ms,
+                self._pressure_profile_hpa,
+                self._temperature_profile_c,
+                self._dewpoint_profile_c,
+            )
+            self._plot_hodograph()
+        
     def _add_height_markers(self) -> None:
         height_km_levels = [0, 1, 3, 6, 9, 12, 15]
         transform = transforms.blended_transform_factory(
@@ -770,7 +936,7 @@ class SoundingWindow(QMainWindow):
                 transform=transform,
                 color='red',
                 linewidth=1.4,
-                clip_on=False,
+                clip_on=True,
                 zorder=5,
             )
             self.ax.text(
@@ -788,7 +954,7 @@ class SoundingWindow(QMainWindow):
                 'alpha': 0.5,
                 'pad': 2.5,
                 },
-                clip_on=False,
+                clip_on=True,
                 zorder=5,
             )
     
@@ -948,3 +1114,296 @@ class SoundingWindow(QMainWindow):
         )[0]
         self.figure.canvas.draw_idle()
         return line
+    
+    def _compute_hodograph_diagnostics(
+        self,
+        height_m: np.ndarray,
+        wind_direction_deg: np.ndarray,
+        wind_speed_ms: np.ndarray,
+        pressure_hpa: np.ndarray | None,
+        temperature_c: np.ndarray | None,
+        dewpoint_c: np.ndarray | None,
+    ) -> None:
+        self._hodograph_profile = {}
+        self._storm_relative_profile = {}
+        self._storm_motion = {}
+        self._effective_inflow_layer = (np.nan, np.nan)
+        self._low_level_shear = (np.nan, np.nan)
+        
+        hgt = np.asarray(height_m, dtype=float)
+        wdir = np.asarray(wind_direction_deg, dtype=float)
+        wspd = np.asarray(wind_speed_ms, dtype=float)
+        
+        valid = np.isfinite(hgt) & np.isfinite(wdir) & np.isfinite(wspd) & (hgt <= 12000.0)
+        if valid.sum() < 2:
+            self._hodograph_mode_combo.setEnabled(False)
+            return
+        
+        surface_height = float(np.nanmin(hgt[valid]))
+        hgt_agl_full = hgt - surface_height
+        
+        hgt = hgt_agl_full[valid]
+        wdir = wdir[valid]
+        wspd = wspd[valid]
+        
+        order = np.argsort(hgt)
+        hgt = hgt[order]
+        wdir = wdir[order]
+        wspd = wspd[order]
+        
+        u_ms, v_ms = wind_components_from_direction_speed(wdir, wspd)
+        ms_to_kt = 1.94384
+        self._hodograph_profile = {
+            'height_m': hgt,
+            'u_ms': u_ms,
+            'v_ms': v_ms,
+            'u_kt': u_ms * ms_to_kt,
+            'v_kt': v_ms * ms_to_kt,
+        }
+        
+        self._storm_motion = bunkers_storm_motion(hgt, wdir, wspd)
+        parcel_layer = self._parcel_data.get(self._selected_parcel_key(), {}) if self._parcel_data else {}
+        lcl_height = parcel_layer.get('lcl', np.nan) if isinstance(parcel_layer, dict) else np.nan
+        el_height = parcel_layer.get('el', np.nan) if isinstance(parcel_layer, dict) else np.nan
+        
+        if (
+            pressure_hpa is not None
+            and np.isfinite(lcl_height)
+            and np.isfinite(el_height)
+            and el_height > lcl_height
+        ):
+            mw_u, mw_v = pressure_weighted_mean_wind_components(
+                hgt_agl_full, pressure_hpa, wind_direction_deg, wind_speed_ms, lcl_height, el_height
+            )
+            if np.isfinite(mw_u) and np.isfinite(mw_v):
+                self._storm_motion['MW'] = (mw_u, mw_v)
+        
+        rm_u, rm_v = self._storm_motion.get('RM', (np.nan, np.nan))
+        if np.isfinite(rm_u) and np.isfinite(rm_v):
+            sr_u_ms, sr_v_ms = storm_relative_wind_components(u_ms, v_ms, rm_u, rm_v)
+            self._storm_relative_profile = {
+                'height_m': hgt,
+                'u_ms': sr_u_ms,
+                'v_ms': sr_v_ms,
+                'u_kt': sr_u_ms * ms_to_kt,
+                'v_kt': sr_v_ms * ms_to_kt,
+            }
+        
+        if (
+            pressure_hpa is not None
+            and temperature_c is not None
+            and dewpoint_c is not None
+        ):
+            self._effective_inflow_layer = effective_inflow_layer(
+                pressure_hpa, temperature_c, dewpoint_c, hgt_agl_full
+            )
+        
+        base_height, _ = self._effective_inflow_layer
+        if np.isfinite(base_height) and base_height <= 50.0:
+            shear_u, shear_v = shear_vector(
+                hgt_agl_full, wind_direction_deg, wind_speed_ms, base_height, 500.0
+            )
+            if np.isfinite(shear_u) and np.isfinite(shear_v):
+                self._low_level_shear = (
+                    shear_u,
+                    shear_v,
+                )
+        
+        self._hodograph_mode_combo.setEnabled(True)
+    
+    def _components_at_height(self, target_height_m: float, storm_relative: bool = False) -> tuple[float, float]:
+        profile = self._storm_relative_profile if (storm_relative and self._storm_relative_profile) else self._hodograph_profile
+        if not self._hodograph_profile:
+            return np.nan, np.nan
+        
+        heights = profile.get('height_m')
+        u_ms = profile.get('u_ms')
+        v_ms = profile.get('v_ms')
+        if heights is None or u_ms is None or v_ms is None:
+            return np.nan, np.nan
+            
+        if target_height_m < heights.min() or target_height_m > heights.max():
+            return np.nan, np.nan
+        
+        u = float(np.interp(target_height_m, heights, u_ms))
+        v = float(np.interp(target_height_m, heights, v_ms))
+        return u, v
+    
+    def _hodograph_layer_color(self, height_m: float) -> str:
+        height_km = height_m / 1000.0
+        if height_km < 1.0:
+            return 'purple'
+        if height_km < 3.0:
+            return 'red'
+        if height_km < 6.0:
+            return 'green'
+        if height_km < 9.0:
+            return 'yellow'
+        if height_km < 12.0:
+            return 'cyan'
+        return '#a0a0a0'
+    
+    def _plot_hodograph(self) -> None:
+        self._hodograph_ax.cla()
+        self._hodograph_artist = []
+        self._init_hodograph_axes()
+        
+        use_storm_relative = (
+            self._hodograph_mode == 'Storm-Relative' and bool(self._storm_relative_profile)
+        )
+        profile = self._storm_relative_profile if use_storm_relative else self._hodograph_profile
+        
+        heights = profile.get('height_m') if profile else None
+        u_comp = profile.get('u_kt') if profile else None
+        v_comp = profile.get('v_kt') if profile else None
+        
+        if heights is None or u_comp is None or v_comp is None or heights.size < 2:
+            self._hodograph_ax.text(
+                0.0,
+                0.0,
+                'No hodograph data',
+                color='white',
+                fontsize=10,
+                ha='center',
+                va='center',
+            )
+            self.figure.canvas.draw_idle()
+            return
+        
+        if self._hodograph_mode == 'Storm-Relative' and not use_storm_relative:
+            self._hodograph_ax.text(
+                0.0,
+                0.0,
+                'Storm motion unavailable\nShowing ground-relative winds',
+                color='white',
+                fontsize=9,
+                ha='center',
+                va='center',
+            )
+        
+        for idx in range(u_comp.size - 1):
+            layer_height = 0.5 * (heights[idx] + heights[idx + 1])
+            color = self._hodograph_layer_color(layer_height)
+            segment = self._hodograph_ax.plot(
+                u_comp[idx:idx + 2],
+                v_comp[idx:idx + 2],
+                color=color,
+                linewidth=2.4,
+                zorder=3,
+            )[0]
+            self._hodograph_artist.append(segment)
+        
+        self._plot_storm_motion_markers(use_storm_relative)
+        self._plot_effective_inflow_layer(use_storm_relative)
+        self._plot_low_level_shear()
+        
+        title_mode = 'Storm-Relative' if self._hodograph_mode == 'Storm-Relative' else 'Ground-Relative'
+        self._hodograph_ax.set_title(
+            f'Hodograph ({title_mode})',
+            color='white',
+            fontsize=12,
+            pad=10,
+        )
+        self._hodograph_ax.set_xlim(-self._hodograph_range_ms, self._hodograph_range_ms)
+        self._hodograph_ax.set_ylim(-self._hodograph_range_ms, self._hodograph_range_ms)
+        
+        self.figure.canvas.draw_idle()
+    
+    def _plot_storm_motion_markers(self, use_storm_relative: bool) -> None:
+        if not self._storm_motion:
+            return
+        
+        rm_u, rm_v = self._storm_motion.get('RM', (np.nan, np.nan))
+        reference_u = rm_u if use_storm_relative else 0.0
+        reference_v = rm_v if use_storm_relative else 0.0
+        ms_to_kt = 1.94384
+        
+        colors = {'RM': 'white', 'MW': 'orange', 'LM': 'white'}
+        for key, color in colors.items():
+            motion_u, motion_v = self._storm_motion.get(key, (np.nan, np.nan))
+            if not (np.isfinite(motion_u) and np.isfinite(motion_v)):
+                continue
+            plot_u = (motion_u - reference_u) * ms_to_kt 
+            plot_v = (motion_v - reference_v) * ms_to_kt
+            marker = self._hodograph_ax.scatter(
+                plot_u, plot_v, color=color, edgecolor='black', s=55, zorder=5
+            )
+            label = self._hodograph_ax.text(
+                plot_u + 2.0,
+                plot_v,
+                key,
+                color=color,
+                fontsize=9,
+                va='center',
+                ha='left',
+                bbox={
+                    'facecolor': 'black',
+                    'edgecolor': 'none',
+                    'alpha': 0.1,
+                    'pad': 1.5,
+                },
+                zorder=6,
+            )
+            self._hodograph_artist.extend([marker, label])
+    
+    def _plot_effective_inflow_layer(self, use_storm_relative: bool) -> None:
+        base_height, top_height = self._effective_inflow_layer
+        rm_u, rm_v = self._storm_motion.get('RM', (np.nan, np.nan))
+        if not (
+            np.isfinite(base_height)
+            and np.isfinite(top_height)
+            and np.isfinite(rm_u)
+            and np.isfinite(rm_v)
+        ):
+            return
+        
+        base_u, base_v = self._components_at_height(base_height)
+        top_u, top_v = self._components_at_height(top_height)
+        if not np.all(np.isfinite([base_u, base_v, top_u, top_v])):
+            return
+        
+        ref_u = rm_u if use_storm_relative else 0.0
+        ref_v = rm_v if use_storm_relative else 0.0
+        ms_to_kt = 1.94384
+        points_u = [
+            (base_u - ref_u) * ms_to_kt,
+            (rm_u - ref_u) * ms_to_kt,
+            (top_u - ref_u) * ms_to_kt,
+        ]
+        points_v = [
+            (base_v - ref_v) * ms_to_kt,
+            (rm_v - ref_v) * ms_to_kt,
+            (top_v - ref_v) * ms_to_kt,
+        ]
+        line = self._hodograph_ax.plot(points_u, points_v, color='cyan', linewidth=1.5, zorder=4)[0]
+        self._hodograph_artist.append(line)
+    
+    def _plot_low_level_shear(self) -> None:
+        shear_u_ms, shear_v_ms = self._low_level_shear
+        base_height, _ = self._effective_inflow_layer
+        
+        if not (np.isfinite(base_height) and np.isfinite(shear_u_ms) and np.isfinite(shear_v_ms)):
+            return
+        
+        use_storm_relative = (
+            self._hodograph_mode == 'Storm-Relative' and bool(self._storm_relative_profile)
+        )
+        base_u_ms, base_v_ms = self._components_at_height(base_height, storm_relative=use_storm_relative)
+        if not np.all(np.isfinite([base_u_ms, base_v_ms])):
+            return
+        
+        ms_to_kt = 1.94384
+        start_u = base_u_ms * ms_to_kt
+        start_v = base_v_ms * ms_to_kt
+        end_u = start_u + shear_u_ms * ms_to_kt
+        end_v = start_v + shear_v_ms * ms_to_kt
+        
+        line = self._hodograph_ax.plot(
+            [start_u, end_u], [start_v, end_v], color='blue', linewidth=0.5, zorder=4
+        )[0]
+        self._hodograph_artist.append(line)
+    
+    def _on_hodograph_mode_changed(self, mode: str) -> None:
+        self._hodograph_mode = mode
+        if self._hodograph_profile:
+            self._plot_hodograph()

@@ -10,6 +10,8 @@ The scripts import the following packages:
 `matplotlib`
 `cartopy`
 `PySide6`
+NEW: `imageio`
+NEW: `imageio[ffmpeg]`
 
 ## QT Error
 If you see this error: `Could not find the Qt platform plugin "xcb"`:

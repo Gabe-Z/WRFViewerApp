@@ -35,6 +35,9 @@ import shutil
 import sys
 import typing as T
 
+import importlib
+import importlib.util
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from collections import OrderedDict
@@ -50,6 +53,9 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -62,6 +68,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QSplitter,
     QToolBox,
     QVBoxLayout,
@@ -1152,6 +1159,80 @@ class PreloadWorker(QtCore.QObject):
             self.failed.emit(str(e))
 
 # ------------------------------
+# Dialogs
+# ------------------------------
+class VideoExportDialog(QDialog):
+    def __init__(self, parent=None, default_path: Path | None = None):
+        super().__init__(parent)
+        self.setWindowTitle('Export Video')
+        
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        
+        self._path_edit = QLineEdit(str(default_path) if default_path else '')
+        browse = QPushButton('Browse...')
+        browse.clicked.connect(self._choose_path)
+        
+        path_row = QHBoxLayout()
+        path_row.addWidget(self._path_edit)
+        path_row.addWidget(browse)
+        form.addRow('File name:', path_row)
+        
+        self._format_combo = QComboBox()
+        self._format_combo.addItem('MP4 (.mp4)', userData='mp4')
+        self._format_combo.addItem('MKV (.mkv)', userData='mkv')
+        self._format_combo.currentIndexChanged.connect(self._sync_extension)
+        form.addRow('Format:', self._format_combo)
+        
+        self._speed_spin = QSpinBox()
+        self._speed_spin.setRange(25, 500)
+        self._speed_spin.setSingleStep(25)
+        self._speed_spin.setValue(100)
+        self._speed_spin.setSuffix('ms/frame')
+        form.addRow('Speed per frame:', self._speed_spin)
+        
+        layout.addLayout(form)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+    
+    def _choose_path(self):
+        ext = self._format_combo.currentData() or 'mp4'
+        filt = 'MP4 Video (*.mp4);;Matroska Video (*.mkv)'
+        start_dir = self._path_edit.text() or str(Path.cwd() / 'Video_Export' / f'wrf_video.{ext}')
+        path, _ = QFileDialog.getSaveFileName(self, 'Export Video', start_dir, filt)
+        if path:
+            self._path_edit.setText(path)
+            suffix = Path(path).suffix.lower()
+            if suffix == '.mkv':
+                self._format_combo.setCurrentIndex(1)
+            else:
+                self._format_combo.setCurrentIndex(0)
+    
+    def _sync_extension(self):
+        path = Path(self._path_edit.text()) if self._path_edit.text() else None
+        if not path:
+            return
+        ext = self._format_combo.currentData()
+        if not ext:
+            return
+        self._path_edit.setText(str(path.with_suffix(f'.{ext}')))
+    
+    def output_path(self) -> Path:
+        text = self._path_edit.text().strip()
+        path = Path(text) if text else Path.cwd() / 'Video_Export' / 'wrf_video.mp4'
+        ext = self._format_combo.currentData()
+        if ext and path.suffix.lower() != f'.{ext}':
+            path = path.with_suffix(f'.{ext}')
+        return path
+    
+    def speed_ms(self) -> int:
+        return int(self._speed_spin.value())
+
+
+# ------------------------------
 # GUI
 # ------------------------------
 class WRFViewer(QMainWindow):
@@ -1304,6 +1385,10 @@ class WRFViewer(QMainWindow):
         self.btn_export = QPushButton('Export PNG...')
         self.btn_export.clicked.connect(self.on_export_png)
         controls.addWidget(self.btn_export)
+        
+        self.btn_export_video = QPushButton('Export Video...')
+        self.btn_export_video.clicked.connect(self.on_export_video)
+        controls.addWidget(self.btn_export_video)
         
         self.btn_generate_sounding = QPushButton('Generate Sounding')
         self.btn_generate_sounding.clicked.connect(self.on_generate_sounding)
@@ -1470,7 +1555,7 @@ class WRFViewer(QMainWindow):
             ha='left',
             va='bottom',
             fontsize=9,
-            zorder=6,
+            zorder=40,
             bbox=dict(
                 boxstyle='round,pad=0.3',
                 facecolor='white',
@@ -1927,6 +2012,102 @@ class WRFViewer(QMainWindow):
             return
         self.fig.savefig(out, dpi=150, bbox_inches='tight')
         
+    def on_export_video(self):
+        if not self.loader.frames:
+            return
+        
+        video_dir = Path.cwd() / 'Video_Export'
+        video_dir.mkdir(parents=True, exist_ok=True)
+        default_name = video_dir / 'wrf_video.mp4'
+        dialog = VideoExportDialog(self, default_path=default_name)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        
+        output_path = dialog.output_path()
+        speed_ms = dialog.speed_ms()
+        try:
+            self._export_video_frames(output_path, speed_ms)
+        except Exception as e:
+            traceback.print_exc()
+            QMessageBox.critical(self, 'Export error', str(e))
+    
+    def _require_imageio(self):
+        if importlib.util.find_spec('imageio') is None:
+            raise RuntimeError('Video export requires the "imageio" package. Install it with "pip install imageio".')
+        return importlib.import_module('imageio')
+    
+    def _export_video_frames(self, output_path: Path, speed_ms: int):
+        total_frames = len(self.loader.frames)
+        if total_frames == 0:
+            raise RuntimeError('No frames to export.')
+        
+        imageio = self._require_imageio()
+        
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fps = 1000.0 / max(1, speed_ms)
+        
+        original_idx = self.sld_time.value()
+        was_playing = self.timer.isActive()
+        self.timer.stop()
+        self.btn_play.setChecked(False)
+        self.btn_play.setText('▶ Play')
+        
+        self.pb.setVisible(True)
+        self.pb.setValue(0)
+        self.status.showMessage(f'Exporting video to {output_path}')
+        
+        try:
+            try:
+                try:
+                    writer_ctx = imageio.get_writer(
+                        output_path,
+                        fps=fps,
+                        # Avoid auto-resizing frames to a 16 px macro-block boundary.
+                        macro_block_size=1,
+                    )
+                except TypeError:
+                    writer_ctx = imageio.get_writer(output_path, fps=fps)
+            except Exception as e:
+                raise RuntimeError(
+                    'Unable to open the video writer. Install an ffmpeg backend with "pip install imageio[ffmpeg]" '
+                    'or "pip install imageio[pyav]" before exporting.'
+                ) from e
+            
+            with writer_ctx as writer:
+                for idx in range(total_frames):
+                    self._stepping = True
+                    try:
+                        self.sld_time.setValue(idx)
+                        self.update_plot()
+                    finally:
+                        self._stepping = False
+                    
+                    self.canvas.draw()
+                    width, height = self.canvas.get_width_height()
+                    buffer = np.frombuffer(self.canvas.buffer_rgba(), dtype=np.uint8)
+                    frame = buffer.reshape((height, width, 4))[..., :3].copy()
+                    writer.append_data(frame)
+                    
+                    progress = int((idx + 1) * 100 / total_frames)
+                    self.pb.setValue(progress)
+                    QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents)
+        finally:
+            self._stepping = True
+            try:
+                self.sld_time.setValue(original_idx)
+                self.update_plot()
+            finally:
+                self._stepping = False
+            
+            self.pb.setValue(100)
+            QtCore.QTimer.singleShot(750, lambda: self.pb.setVisible(False))
+            self.status.showMessage('Export complete', 2000)
+            
+            if was_playing:
+                self.btn_play.setChecked(True)
+                self.btn_play.setText('⏸ Pause')
+                self.timer.start()
+    
     # ---------------
     # Plotting
     # ---------------
@@ -2035,7 +2216,7 @@ class WRFViewer(QMainWindow):
                 plot_lat,
                 data,
                 levels=levels,
-                transforms=ccrs.PlateCarree(),
+                transform=ccrs.PlateCarree(),
                 cmap=cmap_to_use,
                 norm=norm,
                 vmin=vmin,
