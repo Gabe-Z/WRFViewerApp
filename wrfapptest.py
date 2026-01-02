@@ -16,8 +16,16 @@ Tested libs: wrf-python, netCDF4, numpy, xarray (optional), cartopy, matplotlib,
 
 Pack to an EXE (Windows) or app bundle (macOS) with PyInstaller, see bottom of file for notes.
 '''
-
 from __future__ import annotations
+import os
+import sys
+
+# Force Windows Platform (Fixes the xcb error)
+if getattr(sys, 'frozen', False):
+    plugin_path = os.path.join(sys._MEIPASS, 'PySide6', 'plugins')
+    os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = plugin_path
+    os.environ['QT_QPA_PLATFORM'] = 'windows'
+
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import glob
@@ -29,13 +37,12 @@ import matplotlib.patheffects as mpatheffects
 import matplotlib.transforms as mtransforms
 import matplotlib.ticker as mticker
 import numpy as np
-import os
 import platform
 import shutil
-import sys
 import typing as T
 
 import importlib
+import imageio_ffmpeg
 import importlib.util
 
 from dataclasses import dataclass
@@ -1446,11 +1453,11 @@ class WRFViewer(QMainWindow):
         self._click_cid = self.canvas.mpl_connect('button_press_event', self.on_map_click)
         self._hover_cid = self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
         self._timestamp_text = self.fig.text(
-            0.02,
-            0.02,
+            0.45,
+            0.1,
             '',
             transform=self.fig.transFigure,
-            ha='left',
+            ha='center',
             va='bottom',
             fontsize=9,
             bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.25')
@@ -1642,7 +1649,9 @@ class WRFViewer(QMainWindow):
     def on_open(self):
         dlg = QFileDialog(self, 'Select wrfout files', os.getcwd(), 'WRF NetCDF (wrfout_*);;All files (*)')
         dlg.setFileMode(QFileDialog.ExistingFiles)
-        dlg.setOption(QFileDialog.DontUseNativeDialog, True)
+        # Window users need the native dialog so network paths (e.g., WSL shares) appear.
+        use_native = platform.system().lower() == 'windows'
+        dlg.setOption(QFileDialog.DontUseNativeDialog, not use_native)
         if not dlg.exec():
             return
         paths = dlg.selectedFiles()
@@ -2034,7 +2043,57 @@ class WRFViewer(QMainWindow):
     def _require_imageio(self):
         if importlib.util.find_spec('imageio') is None:
             raise RuntimeError('Video export requires the "imageio" package. Install it with "pip install imageio".')
-        return importlib.import_module('imageio')
+        imageio = importlib.import_module('imageio')
+        
+        def resolve_ffmpeg() -> Path | None:
+            # 1) Environment override (user-provided)
+            ffmpeg_env = os.environ.get('IMAGEIO_FFMPEG_EXE')
+            if ffmpeg_env:
+                env_path = Path(ffmpeg_env) 
+                if env_path.exists():
+                    return env_path
+            
+            # 2) Bundled with imageio_ffmpeg (handles normal installs)
+            try:
+                import imageio_ffmpeg
+                
+                ffmpeg_path = Path(imageio_ffmpeg.get_ffmpeg_exe())
+                if ffmpeg_path.exists():
+                    return ffmpeg_path
+            except Exception:
+                pass
+            
+            # 3) Frozen executable bundle: search the unpacked directory for ffmpeg*.exe
+            if getattr(sys, 'frozen', False):
+                bundle_root = Path(getattr(sys, '_MEIPASS', Path.cwd()))
+                for candiate in [
+                    bundle_root / 'ffmpeg.exe',
+                    bundle_root / 'imageio_ffmpeg' / 'binaries',
+                ]:
+                    if candiate.is_file():
+                        return candiate
+                    if candiate.is_dir():
+                        for exe in candiate.glob('ffmpeg*.exe'):
+                            if exe.is_file():
+                                return exe
+                
+                # Fallback: recursive glob in the bundle (bundle is small)
+                for exe in bundle_root.glob('**/ffmpeg*.exe'):
+                    if exe.is_file():
+                        return exe
+        
+            return None
+        
+        ffmpeg_path = resolve_ffmpeg()
+        if ffmpeg_path:
+            os.environ['IMAGEIO_FFMPEG_EXE'] = str(ffmpeg_path)
+        else:
+            raise RuntimeError(
+                'No ffmpeg executable was found. Install ffmpeg, set IMAGEIO_FFMPEG_EXE to the executable path, '
+                'or rebuild the packaged app with ffmpeg bundled.'
+            )
+        
+        return imageio
     
     def _export_video_frames(self, output_path: Path, speed_ms: int):
         total_frames = len(self.loader.frames)
@@ -2884,7 +2943,7 @@ class WRFViewer(QMainWindow):
 # ------------------------
 def main():
     # On some Linux desktops, force XCB to avoid wayland plugin warnings
-    os.environ.setdefault('QT_QPA_PLATFORM', 'xcb')
+    ''' FOR UBUNUTU os.environ.setdefault('QT_QPA_PLATFORM', 'xcb')
     os.environ.setdefault('PROJ_NETWORK', 'OFF')
     os.environ.setdefault('PYPROJ_NETWORK', 'OFF')
     
@@ -2894,6 +2953,23 @@ def main():
     #win.showMaximized()
     #win.setWindowState(Qt.WindowActive | Qt.WindowMaximized)
     #win.show()
+    win.showMaximized()
+    sys.exit(app.exec())'''
+    
+    ''' FOR WINDOW EXE '''
+    if sys.platform.startswith('linux') and not getattr(sys, 'frozen', False):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'xcb')
+    elif getattr(sys, 'frozen', False):
+        os.environ['QT_QPA_PLATFORM'] = 'windows'
+    
+    os.environ.setdefault('PROJ_NETWORK', 'OFF')
+    os.environ.setdefault('PYPROJ_NETWORK', 'OFF')
+    
+    app = QApplication(sys.argv)
+    
+    app.setAttribute(Qt.AA_EnableHighDpiScaling)
+    
+    win = WRFViewer()
     win.showMaximized()
     sys.exit(app.exec())
     
