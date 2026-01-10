@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import platform
+import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -42,6 +43,12 @@ from calc import (
     wind_components_at_height,
     shear_vector,
 )
+
+
+def _app_root() -> Path:
+    if getattr(sys, 'frozen', False):
+        return(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
 
 def _standard_atmosphere_pressure(height_m: float) -> float:
@@ -266,7 +273,7 @@ class SoundingWindow(QMainWindow):
         yymmdd_hhmm = export_time.strftime('%y%m%d/%H%M')
         yymmdd_hh = export_time.strftime('%y%m%d/%H')
         timestamp = export_time.strftime('%Y-%m-%d_%H_%M_%S')
-        export_dir = Path.cwd() / 'Sounding Export'
+        export_dir = _app_root() / 'Sounding Export'
         export_dir.mkdir(parents=True, exist_ok=True)
         filename = export_dir / (
             f'WRF_{computer_name}_{self._latitude:.4f}_{self._longitude:.4f}_{timestamp}.txt'

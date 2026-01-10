@@ -1,17 +1,37 @@
 # To-Do:
-	- [ ] OLR variable.
-	- [ ] IR simulated satellite.
+	- [ ] (High Priority) Add severe weather composite such as stp, srh, bulk shear and etc.
 	- [ ] (Low Priority) Fix mercator projection resulting in calculating UH threshold to be off.
 	- [ ] Add PW, DCAPE, 3CAPE to the Thermodyanmic Indices.
 	- [ ] Plot effective inflow layer onto the Skew-T chart.
 	- [ ] And much more.
 
-# Version: 0.1.1 Alpha
+# Version: 0.2.0 Alpha
 ## Added:
+	- [x] Most Unstable CAPE variable.
+	- [x] Mixed-Layer CAPE variable.
+	- [x] 0-3 km AGL CAPE variable.
+	- [x] County lines and primary/secondary networks in US.
+	- [x] OLR variable.
+	- [x] IR simulated satellite.
 
 ## Changes:
-	- [x] Change info/time label to center below the plot rather than lower-left.
+	- [x] 500 mb Height, Wind now shows the Wind Speed plot instead of Geopotential Height plot.
+	- [x] Improve Image Export
+	- [x] Changes the inline value label/barbs strides to 100 to prevent them lagging too much.
+	- [x] Added domain resolution info to the info/time label.
+	- [x] Change the geopotential height from meter to decameter.
+
 ## Fixes:
+	- [x] Fixed the plot/colorbar positions.
+	- [x] Fixed the figure displacement on Export Image.
+	- [x] Change info/time label lower to prevent from label overlapping the plot.
+
+## Version: 0.1.1 Alpha
+### Added:
+
+### Changes:
+	- [x] Change info/time label to center below the plot rather than lower-left.
+### Fixes:
 	- [x] Fix Video Export: [WinError 2] The system cannot find the file specified.
 	- [x] When opening wrfout files, make it able to include network like wsl files. Since using Window system (.exe) cause network files to disappear.
 

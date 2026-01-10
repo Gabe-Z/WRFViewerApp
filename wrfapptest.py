@@ -28,6 +28,8 @@ if getattr(sys, 'frozen', False):
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+from cartopy.feature import ShapelyFeature
+from cartopy.io import shapereader
 import glob
 import traceback
 import matplotlib
@@ -37,9 +39,13 @@ import matplotlib.patheffects as mpatheffects
 import matplotlib.transforms as mtransforms
 import matplotlib.ticker as mticker
 import numpy as np
+import math
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import platform
 import shutil
 import typing as T
+import contextlib
+import time
 
 import importlib
 import imageio_ffmpeg
@@ -82,6 +88,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from wrf import to_np # getvar, latlon_coords, ALL_TIMES, interplevel
+
+
+def _app_root() -> Path:
+    if getattr(sys, 'frozen', False):
+        return(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
 from sounding import SoundingWindow
 
 from calc import (
@@ -105,7 +119,13 @@ from calc import (
     surface_based_cape,
     surface_based_cape_from_profile,
     slice_time_var,
+    most_unstable_cape,
+    mixed_layer_cape,
+    cape_0_3km_agl,
 )
+
+STEFAN_BOLTZMANN = 5.670374419e-8 # W m^-2 K^-4
+MPS_TO_KT = 1.9438444924406
 
 
 # ------------------------
@@ -117,6 +137,7 @@ class WRFFrame:
     time_index: int
     timestamp_str: str
     timestamp: datetime | None = None
+    resolution_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -165,12 +186,12 @@ UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
         canonical='HGT500',
         display_name='500 mb Height, Wind',
         level_hpa=500.0,
-        shading_field='height',
-        colorbar_label='500 hPa Geopotential Height (m)',
-        vmin=4800.0,
-        vmax=6000.0,
+        shading_field='wspd',
+        colorbar_label='Wind Speed (kt)',
+        vmin=0,
+        vmax=140.0,
         contour_field='height',
-        contour_levels=np.arange(4800.0, 6000.1, 60.0),
+        contour_levels=np.arange(480.0, 600.1, 6.0),
         contour_color='black',
         contour_width=0.9,
         barb_stride=16,
@@ -187,7 +208,7 @@ UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
         vmin=0.0,
         vmax=100.0,
         contour_field='height',
-        contour_levels=np.arange(2300.0, 3500.1, 60.0),
+        contour_levels=np.arange(230.0, 350.1, 6.0),
         contour_color='black',
         contour_width=0.8,
         barb_stride=16,
@@ -204,7 +225,7 @@ UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
         vmin=-51.1,
         vmax=48.9,
         contour_field='height',
-        contour_levels=np.arange(1000.0, 1700.1, 30.0),
+        contour_levels=np.arange(100.0, 170.1, 3.0),
         contour_color='black',
         contour_width=1.0,
         barb_stride=16,
@@ -380,6 +401,7 @@ class WRFLoader(QtCore.QObject):
         frames: list[WRFFrame] = []
         for fp in self.files:
             with Dataset(fp) as nc:
+                resolution_m = getattr(nc, 'DX', None)
                 if 'Times' not in nc.variables:
                     raise RuntimeError(f'Times variable missing in {fp}')
                 times_arr = nc.variables['Times'][:]
@@ -392,6 +414,7 @@ class WRFLoader(QtCore.QObject):
                             time_index=ti,
                             timestamp_str=formatted_ts,
                             timestamp=self._parse_timestamp(ts),
+                            resolution_m=resolution_m,
                         )
                     )
         frames.sort(key=lambda fr: (os.path.getmtime(fr.path), fr.time_index))
@@ -874,15 +897,24 @@ class WRFLoader(QtCore.QObject):
             raise RuntimeError(f'Missing shading field "{spec.shading_field}" for {var}.')
         scalar2d = interp_to_pressure(scalar3d, pressure, spec.level_hpa, frame.path, self._pressure_orientation)
         
+        if spec.canonical == 'HGT500':
+            scalar2d = scalar2d * MPS_TO_KT
+        
         contour2d = None
         if spec.contour_field:
             contour3d = base_fields.get(spec.contour_field)
             if contour3d is None:
                 raise RuntimeError(f'Missing contour field "{spec.contour_field}" for {var}.')
             contour2d = interp_to_pressure(contour3d, pressure, spec.level_hpa, frame.path, self._pressure_orientation)
+            if spec.contour_field == 'height':
+                contour2d = contour2d / 10.0
         
         u2d = interp_to_pressure(base_fields['u'], pressure, spec.level_hpa, frame.path, self._pressure_orientation)
         v2d = interp_to_pressure(base_fields['v'], pressure, spec.level_hpa, frame.path, self._pressure_orientation)
+        
+        if spec.canonical == 'HGT500':
+            u2d = u2d * MPS_TO_KT
+            v2d = v2d * MPS_TO_KT
         
         data = UpperAirData(
             scalar=scalar2d.astype(float32),
@@ -951,6 +983,24 @@ class WRFLoader(QtCore.QObject):
                 data2d = np.array(nc.variables['RAINNC'][frame.time_index, :, :])
             elif v == 'RAINC':
                 data2d = np.array(nc.variables['RAINC'][frame.time_index, :, :])
+            elif v == 'SIRS':
+                src = 'LWUPT' if 'LWUPT' in nc.variables else None
+                if src is None:
+                    raise RuntimeError('Variable "LWUPT" not found; cannot compute simulated IR satellite field.')
+                
+                flux = np.array(nc.variables[src][frame.time_index, :, :])
+                flux = np.clip(flux, 0.0, None)
+                brigthness_k = np.power(flux / STEFAN_BOLTZMANN, 0.25)
+                data2d = brigthness_k - 273.15
+                data2d = data2d.astype(float32)
+            elif v == 'OLR':
+                if 'OLR' not in nc.variables:
+                    raise RuntimeError('Variable "OLR" not found; cannot compute outgoing longwave radiation field.')
+                
+                olr_wm2 = np.array(nc.variables['OLR'][frame.time_index, :, :])
+                olr_wm2 = np.clip(olr_wm2, 0.0, None)
+                data2d = (np.power(olr_wm2, 0.25) * 83.98) - 328.83
+                data2d = data2d.astype(float32)
             elif v == 'SNOW10':
                 data2d = self._snowfall_10_to_1(frame)
             elif v == 'GUST':
@@ -1101,7 +1151,7 @@ class WRFLoader(QtCore.QObject):
                 
                 topcol = refl[-1, :, :]
                 data2d = np.where(has, data2d, topcol)
-            elif v == 'SBCAPE':
+            elif v in ('SBCAPE', 'MUCAPE', 'MLCAPE', '03KMCAPE'):
                 base_fields = self._get_upper_base_fields(frame)
                 orient = ensure_pressure_orientation(
                     frame.path, base_fields['pressure'], self._pressure_orientation
@@ -1117,7 +1167,14 @@ class WRFLoader(QtCore.QObject):
                     height = height[::-1, :, :]
                 
                 temp_k = temperature + 273.15
-                data2d = surface_based_cape(pressure, temp_k, rh, height)
+                if v == 'SBCAPE':
+                    data2d = surface_based_cape(pressure, temp_k, rh, height)
+                elif v == 'MUCAPE':
+                    data2d = most_unstable_cape(pressure, temp_k, rh, height)
+                elif v == 'MLCAPE':
+                    data2d = mixed_layer_cape(pressure, temp_k, rh, height)
+                else:
+                    data2d = cape_0_3km_agl(pressure, temp_k, rh, height)
             else:
                 if v not in nc.variables:
                     raise RuntimeError(f'Variable "{var}" not found')
@@ -1208,7 +1265,7 @@ class VideoExportDialog(QDialog):
     def _choose_path(self):
         ext = self._format_combo.currentData() or 'mp4'
         filt = 'MP4 Video (*.mp4);;Matroska Video (*.mkv)'
-        start_dir = self._path_edit.text() or str(Path.cwd() / 'Video_Export' / f'wrf_video.{ext}')
+        start_dir = self._path_edit.text() or str(_app_root() / 'Video Export' / f'wrf_video.{ext}')
         path, _ = QFileDialog.getSaveFileName(self, 'Export Video', start_dir, filt)
         if path:
             self._path_edit.setText(path)
@@ -1229,7 +1286,7 @@ class VideoExportDialog(QDialog):
     
     def output_path(self) -> Path:
         text = self._path_edit.text().strip()
-        path = Path(text) if text else Path.cwd() / 'Video_Export' / 'wrf_video.mp4'
+        path = Path(text) if text else _app_root() / 'Video Export' / 'wrf_video.mp4'
         ext = self._format_combo.currentData()
         if ext and path.suffix.lower() != f'.{ext}':
             path = path.with_suffix(f'.{ext}')
@@ -1259,7 +1316,7 @@ class WRFViewer(QMainWindow):
         
         # --- App Settings ---
         self.settings = QtCore.QSettings('WRFViewer1', 'WRFViewer')
-        self.user_cmap_dir = Path.cwd() / 'Colortable'
+        self.user_cmap_dir = _app_root() / 'Colortable'
         self.project_cmap_dir = self.user_cmap_dir
         for d in (self.user_cmap_dir, self.project_cmap_dir):
             d.mkdir(parents=True, exist_ok=True)
@@ -1271,6 +1328,7 @@ class WRFViewer(QMainWindow):
             'REFL1KM': 'Reflectivity',
             'GUST': 'Wind_Gust',
             'WSPD10': 'Wind_Gust',
+            'HGT500': 'Wind_Gust',
             'RH2WIND10KT': 'Relative-humidity',
             'RH700': 'Relative-humidity',
             'T2F': 'Temperature',
@@ -1278,6 +1336,11 @@ class WRFViewer(QMainWindow):
             'TD2F': 'Dewpoint',
             'SNOW10': 'Snowfall',
             'SBCAPE': 'Cape',
+            'MUCAPE': 'Cape',
+            'MLCAPE': 'Cape',
+            '03KMCAPE': 'Cape',
+            'SIRS': 'Simulated_IR_Satellite',
+            'OLR': 'OLR',
         }
         
         # --- Central ---
@@ -1298,6 +1361,9 @@ class WRFViewer(QMainWindow):
                 {'label': 'Precipitation Type, Rate', 'canonical': 'PTYPE'},
                 {'label': 'Quantitative Precipitation', 'canonical': None, 'is_divider': True},
                 {'label': 'Total Rain Accumulation', 'canonical': 'RAINNC'},
+                {'label': 'Integrated Moisture and Satellite', 'canonical': None, 'is_divider': True},
+                {'label': 'Simulated IR Satellite (°C)', 'canonical': 'SIRS'},
+                {'label': 'Outgoing Longwave Radiation (°C)', 'canonical': 'OLR'},
                 {'label': 'Radar Products', 'canonical': None, 'is_divider': True},
                 {'label': 'Composite Reflectivity', 'canonical': 'MDBZ'},
             ],
@@ -1307,9 +1373,12 @@ class WRFViewer(QMainWindow):
             ],
             'Severe Weather': [
                 {'label': 'Instability', 'canonical': None, 'is_divider': True},
+                {'label': '0-3 km AGL CAPE', 'canonical': '03KMCAPE'},
                 {'label': 'Surface-Based CAPE', 'canonical': 'SBCAPE'},
+                {'label': 'Most Unstable CAPE', 'canonical': 'MUCAPE'},
+                {'label': 'Mixed-Layer CAPE', 'canonical': 'MLCAPE'},
                 {'label': 'Excplicit Convective Products', 'canonical': None, 'is_divider': True},
-                {'label': 'Reflectivity, UH>75', 'canonical': 'MDBZ_1HRUH'},
+                {'label': 'Reflectivity, UH', 'canonical': 'MDBZ_1HRUH'},
                 {'label': 'Composite Reflectivity', 'canonical': 'MDBZ'},
                 {'label': 'Reflectivity 1km', 'canonical': 'REFL1KM'},
             ],
@@ -1419,6 +1488,17 @@ class WRFViewer(QMainWindow):
         self.use_contourf_checkbox.toggled.connect(self.on_fill_method_toggled)
         controls.addWidget(self.use_contourf_checkbox)
         
+        controls.addWidget(QLabel('Overlays:'))
+        self.county_overlay_checkbox = QCheckBox('Counties')
+        self.county_overlay_checkbox.setChecked(False)
+        self.county_overlay_checkbox.toggled.connect(self.on_toggle_county_overlay)
+        controls.addWidget(self.county_overlay_checkbox)
+        
+        self.road_overlay_checkbox = QCheckBox('Road')
+        self.road_overlay_checkbox.setChecked(False)
+        self.road_overlay_checkbox.toggled.connect(self.on_toggle_road_overlay)
+        controls.addWidget(self.road_overlay_checkbox)
+        
         controls.addStretch(1)
         
         self.btn_play = QPushButton('▶ Play')
@@ -1446,15 +1526,40 @@ class WRFViewer(QMainWindow):
         vbox.addLayout(time_row)
         
         # --- Figure & Accordion Layout ---
-        self.fig = plt.figure(figsize=(10, 8))
-        self.ax = plt.axes(projection=ccrs.PlateCarree())
+        self.fig = plt.figure(figsize=(11, 6.75))
+        self._grid = self.fig.add_gridspec(
+            1,
+            3,
+            width_ratios=[1.0, 0.06, 0.09],
+            wspace=0.04,
+            left=0.06,
+            right=0.96,
+            bottom=0.11,
+            top=0.95,
+        )
+        self.ax = self.fig.add_subplot(self._grid[0, 0], projection=ccrs.PlateCarree())
+        self._colorbar_ax = self.fig.add_subplot(self._grid[0, 1])
+        self._colorbar_pad_ax = self.fig.add_subplot(self._grid[0, 2])
+        self._colorbar_pad_ax.axis('off')
         self.canvas = FigureCanvas(self.fig)
         self.toolbar = NavToolbar(self.canvas, self)
+        self._map_extent: T.Optional[list[float]] = None
+        self._extent_guard = False
+        self._extent_callbacks_ready = False
+        self._axes_image_shape: T.Optional[tuple[int, int]] = None
+        self._shapefile_root = _app_root() / 'Shapefile'
+        print(Path(__file__).resolve().parent)
+        self._county_artist = None
+        self._road_artist = None
+        self._road_geometries: list | None = None
         self._click_cid = self.canvas.mpl_connect('button_press_event', self.on_map_click)
         self._hover_cid = self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
+        self.ax.callbacks.connect('xlim_changed', self._on_axes_extent_changed)
+        self.ax.callbacks.connect('ylim_changed', self._on_axes_extent_changed)
+        self.canvas.mpl_connect('resize_event', self._on_canvas_resized)
         self._timestamp_text = self.fig.text(
             0.45,
-            0.1,
+            0.035,
             '',
             transform=self.fig.transFigure,
             ha='center',
@@ -1579,7 +1684,14 @@ class WRFViewer(QMainWindow):
         self.ax.add_feature(cfeature.COASTLINE.with_scale('50m'), linewidth=0.6)
         self.ax.add_feature(cfeature.STATES.with_scale('50m'), linewidth=0.4)
         self.ax.add_feature(cfeature.BORDERS.with_scale('50m'), linewidth=0.6)
-
+        
+        # Seed the extent cache once the axes are ready so early callbacks are no-ops
+        try:
+            self._map_extent = list(self.ax.get_extent(crs=ccrs.PlateCarree()))
+        except Exception:
+            self._map_extent = None
+        self._extent_callbacks_ready = True
+        
         # Sync default selection with accordion
         if self.current_var_label:
             self._sync_category_selection(self.current_var_label)
@@ -1587,6 +1699,241 @@ class WRFViewer(QMainWindow):
     # ---------------
     # Event handlers
     # ---------------
+    def _simplify_geometries(self, shapefile_path: Path, tolerance: float) -> list:
+        try:
+            reader = shapereader.Reader(shapefile_path)
+        except Exception:
+            return []
+        
+        simplified = []
+        for geom in reader.geometries():
+            try:
+                simplified.append(geom.simplify(tolerance, preserve_topology=True))
+            except Exception:
+                simplified.append(geom)
+        return simplified
+    
+    def _get_axes_image_shape(self) -> T.Optional[tuple[int, int]]:
+        try:
+            self.canvas.draw()
+        except Exception:
+            return None
+        
+        bbox_inches = self.ax.get_window_extent().transformed(self.fig.dpi_scale_trans.inverted())
+        dpi = self.fig.get_dpi()
+        width = max(1, int(round(bbox_inches.width * dpi)))
+        height = max(1, int(round(bbox_inches.height * dpi)))
+        return width, height
+    
+    @contextlib.contextmanager
+    def _status_message(self, message: str):
+        previous = self.status.currentMessage() if hasattr(self, 'status') else ''
+        if hasattr(self, 'status'):
+            self.status.showMessage(message)
+            # Force a UI flush so the message appears before expensive work runs.
+            QtWidgets.QApplication.processEvents()
+        
+        try:
+            yield
+        finally:
+            if not hasattr(self, 'status'):
+                return
+            
+            if previous:
+                self.status.showMessage(previous, 1500)
+            else:
+                self.status.clearMessage()
+    
+    def _render_overlay_image(self, features: list[tuple[ShapelyFeature, dict]]) -> np.ndarray | None:
+        if self._map_extent is None:
+            return None
+        
+        axes_shape = self._get_axes_image_shape()
+        if axes_shape is None:
+            return None
+        self._axes_image_shape = axes_shape
+        
+        width_px, height_px = axes_shape
+        dpi = self.fig.get_dpi()
+        fig = matplotlib.figure.Figure(figsize=(width_px / dpi, height_px / dpi), dpi=dpi)
+        fig.patch.set_alpha(0.0)
+        ax = fig.add_axes([0, 0, 1, 1], projection=self.ax.projection)
+        ax.set_extent(self._map_extent, crs=ccrs.PlateCarree())
+        ax.patch.set_alpha(0.0)
+        ax.set_axis_off()
+        
+        for feature, kwargs in features:
+            ax.add_feature(feature, **kwargs)
+        
+        canvas = FigureCanvasAgg(fig)
+        canvas.draw()
+        image = np.asarray(canvas.buffer_rgba())
+        plt.close(fig)
+        return image
+    
+    def _add_overlay_image(self, image: np.ndarray | None, zorder: float) -> matplotlib.image.AxesImage | None:
+        if image is None or self._map_extent is None:
+            return None
+        
+        artist = self.ax.imshow(
+            image,
+            origin='upper',
+            extent=self._map_extent,
+            transform=ccrs.PlateCarree(),
+            zorder=zorder,
+            interpolation='nearest',
+        )
+        artist.set_visible(False)
+        return artist
+    
+    def _reset_overlay_images(self):
+        if self._county_artist is not None:
+            self._county_artist.remove()
+            self._county_artist = None
+        if self._road_artist is not None:
+            self._road_artist.remove()
+            self._road_artist = None
+    
+    def _restore_visible_overlays(self):
+        restored = False
+        if self.county_overlay_checkbox.isChecked():
+            self._load_county_overlay()
+            if self._county_artist is not None:
+                self._county_artist.set_visible(True)
+                restored = True
+        if self.road_overlay_checkbox.isChecked():
+            self._load_road_overlays()
+            if self._road_artist is not None:
+                self._road_artist.set_visible(True)
+                restored = True
+        
+        if restored:
+            self.canvas.draw_idle()
+    
+    def _load_county_overlay(self):
+        if self._county_artist is not None:
+            return
+        if not self._shapefile_root.exists():
+            return
+        
+        loaded = False
+        with self._status_message('Loading County...'):
+            county_path = self._shapefile_root / 'County' / 'countyl010g.shp'
+            if not county_path.exists():
+                return
+            
+            county_geoms = self._simplify_geometries(county_path, tolerance=0.02)
+            if not county_geoms:
+                return
+            
+            county_feature = ShapelyFeature(county_geoms, ccrs.PlateCarree())
+            img = self._render_overlay_image([
+                (
+                    county_feature,
+                    {
+                        'facecolor': 'none',
+                        'edgecolor': '#666666',
+                        'linewidth': 0.3,
+                        'alpha': 0.75,
+                        'zorder': 5,
+                    },
+                )
+            ])
+            self._county_artist = self._add_overlay_image(img, zorder=5)
+            loaded = self._county_artist is not None
+        
+        if loaded:
+            self.status.showMessage('County overlay ready', 3000)
+    
+    def _load_road_overlays(self):
+        if self._road_artist is not None:
+            return
+        if not self._shapefile_root.exists():
+            return
+        
+        loaded = False
+        with self._status_message('Loading Road (will take a minute to load!)...'):
+            if self._road_geometries is None:
+                self._road_geometries = []
+                road_shapefiles = sorted(
+                    path
+                    for path in self._shapefile_root.glob('*/*.shp')
+                    if 'prisecroads' in path.name.lower()
+                )
+                for shp_path in road_shapefiles:
+                    road_geoms = self._simplify_geometries(shp_path, tolerance=0.01)
+                    if not road_geoms:
+                        continue
+                    
+                    self._road_geometries.extend(road_geoms)
+            
+            if not self._road_geometries:
+                return
+                
+            road_feature = ShapelyFeature(self._road_geometries, ccrs.PlateCarree())
+            img = self._render_overlay_image([
+                (
+                    road_feature,
+                    {
+                        'facecolor': 'none',
+                        'edgecolor': 'blue',
+                        'linewidth': 0.45,
+                        'alpha': 0.25,
+                        'zorder': 6,
+                    },
+                )
+            ])
+            self._road_artist = self._add_overlay_image(img, zorder=6)
+            loaded = self._road_artist is not None
+        
+        if loaded:
+            self.status.showMessage('Road overlay ready', 3000)
+    
+    def _on_axes_extent_changed(self, _ax):
+        if getattr(self, '_extent_callbacks_ready', False) is False:
+            return
+        
+        if self._extent_guard:
+            return
+        
+        self._extent_guard = True
+        try:
+            try:
+                extent = list(self.ax.get_extent(crs=ccrs.PlateCarree()))
+            except Exception:
+                return
+        
+            if self._map_extent is None or any(abs(a - b) > 1e-6 for a, b in zip(extent, self._map_extent)):
+                self._map_extent = extent
+                self._reset_overlay_images()
+                self._restore_visible_overlays()
+        finally:
+            self._extent_guard = False
+    
+    def _on_canvas_resized(self, _event):
+        axes_shape = self._get_axes_image_shape()
+        if axes_shape is None:
+            return
+        
+        if self._axes_image_shape != axes_shape:
+            self._axes_image_shape = axes_shape
+            self._reset_overlay_images()
+            self._restore_visible_overlays()
+    
+    def on_toggle_county_overlay(self, checked: bool):
+        self._load_county_overlay()
+        if self._county_artist is None:
+            return
+        self._county_artist.set_visible(checked)
+        self.canvas.draw_idle()
+    
+    def on_toggle_road_overlay(self, checked: bool):
+        self._load_road_overlays()
+        if self._road_artist is None:
+            return
+        self._road_artist.set_visible(checked)
+        self.canvas.draw_idle()
+    
     def on_map_click(self, event):
         if event.button != 1:
             return
@@ -1664,6 +2011,8 @@ class WRFViewer(QMainWindow):
         self.sld_time.setRange(0, max(0, n -1))
         self.sld_time.setValue(0)
         self._extent_set = False
+        self._map_extent = None
+        self._reset_overlay_images()
         self.loader.clear_preloaded()
         self.update_plot()
     
@@ -1821,6 +2170,11 @@ class WRFViewer(QMainWindow):
             'REFL1KM': 'dBZ',
             'PTYPE': 'in/hr',
             'SBCAPE': 'J kg$^{-1}$',
+            'MUCAPE': 'J kg$^{-1}$',
+            'MLCAPE': 'J kg$^{-1}$',
+            '03KMCAPE': 'J kg$^{-1}$',
+            'SIRS': '°C',
+            'OLR': '°C',
         }
         if v in unit_lookup:
             return unit_lookup[v]
@@ -1927,7 +2281,7 @@ class WRFViewer(QMainWindow):
         #self._open_folder_portable(folder)
     
     def on_load_cpt(self):
-        start_dir = str(self.user_cmap_dir if self.user_cmap_dir.exists() else Path.cwd())
+        start_dir = str(self.user_cmap_dir if self.user_cmap_dir.exists() else _app_root())
         path, _ = QFileDialog.getOpenFileName(self, 'Load CPT colormap', start_dir, 'CPT (*.ct *.cpt);;All files (*)')
         if not path:
             return
@@ -2016,16 +2370,37 @@ class WRFViewer(QMainWindow):
     def on_export_png(self):
         if not self.loader.frames:
             return
-        out, _ = QFileDialog.getSaveFileName(self, 'Export PNG', os.getcwd(), 'PNG (*.png)')
+        frame = self.loader.frames[self.sld_time.value()]
+        
+        def _clean_name_component(value: str, fallback: str) -> str:
+            cleaned = ''.join(ch if (ch.isalnum() or ch in ('-', '_')) else '_' for ch in value)
+            cleaned = cleaned.strip('_')
+            return cleaned or fallback
+        
+        if frame.timestamp:
+            ts_component = frame.timestamp.strftime('%Y-%m-%d_%H-%M-%S')
+        else:
+            ts_component = frame.timestamp_str
+        ts_component = _clean_name_component(ts_component, 'frame')
+        
+        var_component = _clean_name_component(self.current_var_label or 'variable', 'variable')
+        
+        export_dir = _app_root() / 'Image Export'
+        export_dir.mkdir(parents=True, exist_ok=True)
+        default_name = export_dir / f'{ts_component}_{var_component}.png'
+        out, _ = QFileDialog.getSaveFileName(
+            self, 'Export PNG', str(default_name), 'PNG (*.png)'
+        )
         if not out:
             return
-        self.fig.savefig(out, dpi=150, bbox_inches='tight')
+        output_path = export_dir / Path(out).name
+        self.fig.savefig(output_path, dpi=300)
         
     def on_export_video(self):
         if not self.loader.frames:
             return
         
-        video_dir = Path.cwd() / 'Video_Export'
+        video_dir = _app_root() / 'Video Export'
         video_dir.mkdir(parents=True, exist_ok=True)
         default_name = video_dir / 'wrf_video.mp4'
         dialog = VideoExportDialog(self, default_path=default_name)
@@ -2179,7 +2554,13 @@ class WRFViewer(QMainWindow):
         frame = self.loader.frames[idx]
         self.lbl_time.setText(f'Time: {frame.timestamp_str}')
         computer_name = (platform.node() or 'computer').replace(' ', '_')
-        self._timestamp_text.set_text(f'WRF {computer_name} - App created by Gabe Zago - {frame.timestamp_str}')
+        if frame.resolution_m is None:
+            resolution_text = 'Domain Resolution: N/A'
+        else:
+            resolution_text = f'Domain Resolution: {frame.resolution_m:.0f}m'
+        self._timestamp_text.set_text(
+            f'WRF {computer_name} - App created by Gabe Zago - {resolution_text} - {frame.timestamp_str}'
+        )
         
         display_var = self.current_var_label
         var = self.loader._var_key(self._canonical_var(display_var))
@@ -2208,7 +2589,17 @@ class WRFViewer(QMainWindow):
             xmin, xmax = float(np.nanmin(lon)), float(np.nanmax(lon))
             dy = (ymax - ymin) * 0.05
             dx = (xmax - xmin) * 0.05
-            self.ax.set_extent([xmin - dx, xmax + dx, ymin - dy, ymax + dy], crs=ccrs.PlateCarree())
+            extent = [xmin - dx, xmax + dx, ymin - dy, ymax + dy]
+            self._extent_guard = True
+            self.ax.set_extent(extent, crs=ccrs.PlateCarree())
+            self._extent_guard = False
+            if self._map_extent != extent:
+                self._map_extent = extent
+                self._reset_overlay_images()
+                self._restore_visible_overlays()
+            if self._map_extent != extent:
+                self._map_extent = extent
+                self._reset_overlay_images()
             self._extent_set = True
         
         overlay_obj: T.Optional[ReflectivityUHOverlays] = None
@@ -2283,7 +2674,7 @@ class WRFViewer(QMainWindow):
             )
             self._img_shape = data.shape
             if self._cbar is None:
-                self._cbar = self.fig.colorbar(self._img_art, ax=self.ax, orientation='vertical', shrink=0.8, pad=0.02)
+                self._cbar = self.fig.colorbar(self._img_art, cax=self._colorbar_ax)
             else:
                 self._cbar.update_normal(self._img_art)
             self._cbar.set_label(label)
@@ -2319,7 +2710,7 @@ class WRFViewer(QMainWindow):
                 self._img_shape = data.shape
                 
                 if self._cbar is None:
-                    self._cbar = self.fig.colorbar(self._img_art, ax=self.ax, orientation='vertical', shrink=0.8, pad=0.02)
+                    self._cbar = self.fig.colorbar(self._img_art, cax=self._colorbar_ax)
                 else:
                     self._cbar.update_normal(self._img_art)
                 self._cbar.set_label(label)
@@ -2405,6 +2796,16 @@ class WRFViewer(QMainWindow):
             return -0.5, 4.0, 'Precipitation Type (in/hr rates)'
         if v == 'SBCAPE':
             return 0.0, 10000.0, 'Surface-Based CAPE (J kg$^{-1}$)'
+        if v == 'MUCAPE':
+            return 0.0, 10000.0, 'Most Unstable CAPE (J kg$^{-1}$)'
+        if v == 'MLCAPE':
+            return 0.0, 10000.0, 'Mixed-Layer CAPE (J kg$^{-1}$)'
+        if v == '03KMCAPE':
+            return 0.0, 500.0, '0-3 km AGL CAPE (J kg$^{-1}$)'
+        if v == 'SIRS':
+            return -90.0, 30.0, 'Simulated IR Satellite (°C)'
+        if v == 'OLR':
+            return -90.0, 40.0, 'Outgoing Longwave Radiation (°C)'
         return None, None, var
     
     def _title_text(self, display_var: str, canonical_var: str) -> str:
@@ -2432,6 +2833,12 @@ class WRFViewer(QMainWindow):
             return '2 m Dewpoint (°F)'
         if v == 'SBCAPE':
             return 'Surface-Based CAPE (J kg$^{-1}$)'
+        if v == 'MUCAPE':
+            return 'Most Unstable CAPE (J kg$^{-1}$)'
+        if v == 'MLCAPE':
+            return 'Mixed-Layer CAPE (J kg$^{-1}$)'
+        if v == '03KMCAPE':
+            return '0-3 km AGL CAPE (J kg$^{-1}$)'
         return display_var
     
     def _precip_type_style(self) -> tuple[ListedColormap, BoundaryNorm, list[int], list[str]]:
@@ -2534,6 +2941,17 @@ class WRFViewer(QMainWindow):
                 pass
         self._value_labels.clear()
     
+    def _grid_sample_indices(self, size: int, target: int = 10, padding: int = 10) -> np.ndarray:
+        if size <= 1:
+            return np.array([0], dtype=int)
+        
+        start = min(padding, size - 1)
+        end = max(size - 1 - padding, start)
+        count = min(target, end - start + 1)
+        
+        indices = np.round(np.linspace(start, end, num=count)).astype(int)
+        return np.unique(np.clip(indices, 0, size - 1))
+    
     def _draw_value_labels(self, lat: np.ndarray, lon: np.ndarray, data: np.ndarray, var: str) -> None:
         self._clear_value_labels()
         if var.upper() not in {'T2F', 'TD2F', 'GUST', 'WSPD10', 'SNOW10'}:
@@ -2555,11 +2973,11 @@ class WRFViewer(QMainWindow):
             lat_arr = lat_arr[:ny, :nx]
             lon_arr = lon_arr[:ny, :nx]
         
-        stride = 20
-        start_y = stride if arr.shape[0] > 1 else 0
-        start_x = stride if arr.shape[1] > 1 else 0
-        for iy in range(start_y, arr.shape[0], stride):
-            for ix in range(start_x, arr.shape[1], stride):
+        y_indices = self._grid_sample_indices(arr.shape[0], 10)
+        x_indices = self._grid_sample_indices(arr.shape[1], 10)
+        
+        for iy in y_indices:
+            for ix in x_indices:
                 val = arr[iy, ix]
                 if not np.isfinite(val):
                     continue
@@ -2758,7 +3176,6 @@ class WRFViewer(QMainWindow):
     def _draw_surface_barbs(self, lat: np.ndarray, lon: np.ndarray, data: SurfaceWindData) -> None:
         self._clear_upper_air_artists()
         
-        stride = 12
         barb_length = 5.5
         barb_color = 'black'
         
@@ -2774,9 +3191,11 @@ class WRFViewer(QMainWindow):
             lat = lat[:ny, :nx]
             lon = lon[:ny, :nx]
         
-        start_y = stride if lat.shape[0] > 1 else 0
-        start_x = stride if lon.shape[1] > 1 else 0
-        sl = (slice(start_y, None, stride), slice(start_x, None, stride))
+        y_indices = self._grid_sample_indices(lat.shape[0], 10)
+        x_indices = self._grid_sample_indices(lat.shape[1], 10)
+        if not y_indices.size or not x_indices.size:
+            return
+        sl = np.ix_(y_indices, x_indices)
         barb_lon = lon[sl]
         barb_lat = lat[sl]
         barb_u = u[sl]
@@ -2835,7 +3254,6 @@ class WRFViewer(QMainWindow):
                     if labels:
                         self._contour_labels.extend(labels)
         
-        stride = max(1, spec.barb_stride)
         u = np.asarray(data.u)
         v = np.asarray(data.v)
         u = np.squeeze(u)
@@ -2847,7 +3265,11 @@ class WRFViewer(QMainWindow):
             v = v[:ny, :nx]
             lat = lat[:ny, :nx]
             lon = lon[:ny, :nx]
-        sl = (slice(None, None, stride), slice(None, None, stride))
+        y_indices = self._grid_sample_indices(lat.shape[0], 10)
+        x_indices = self._grid_sample_indices(lon.shape[0], 10)
+        if not y_indices.size or not x_indices.size:
+            return
+        sl = np.ix_(y_indices, x_indices)
         barb_lon = lon[sl]
         barb_lat = lat[sl]
         barb_u = u[sl]

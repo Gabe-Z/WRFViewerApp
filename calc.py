@@ -543,6 +543,263 @@ def surface_based_cape(
     return cape_flat.reshape(ny, nx)
 
 
+def _parcel_cape_profiles_vectorized(
+    pressure_hpa: np.ndarray,
+    temperature_k: np.ndarray,
+    dewpoint_c: np.ndarray,
+    height_m: np.ndarray,
+    start_idx: np.ndarray,
+    *,
+    start_pressure_hpa: np.ndarray | None = None,
+    start_temperature_c: np.ndarray | None = None,
+    start_dewpoint_c: np.ndarray | None = None,
+    max_height_m: float | None = None,
+) -> np.ndarray:
+    pres = np.asarray(pressure_hpa, dtype=float32)
+    temp_k = np.asarray(temperature_k, dtype=float32)
+    dew_c = np.asarray(dewpoint_c, dtype=float32)
+    hgt = np.asarray(height_m, dtype=float32)
+    
+    nz, ncol = pres.shape
+    start_idx = np.asarray(start_idx, dtype=int)
+    valid_start = (start_idx >= 0) & (start_idx < nz)
+    
+    column_valid = valid_start & np.isfinite(pres[0]) & np.isfinite(temp_k[0]) & np.isfinite(dew_c[0]) & np.isfinite(hgt[0])
+    sufficient = np.isfinite(pres) & np.isfinite(temp_k) & np.isfinite(dew_c) & np.isfinite(hgt)
+    sufficient &= np.arange(nz)[:, None] >= start_idx[None, :]
+    column_valid &= np.sum(sufficient, axis=0) >= 3
+    
+    if not column_valid.any():
+        return np.full(ncol, np.nan, dtype=float32)
+    
+    pres_col = pres[:, column_valid]
+    temp_col = temp_k[:, column_valid]
+    dew_col = dew_c[:, column_valid]
+    hgt_col = _enforce_monotonic_height(hgt[:, column_valid])
+    start_col = start_idx[column_valid]
+    
+    gathered_pres = np.take_along_axis(pres_col, start_col[None, :], axis=0)[0]
+    gathered_temp_k = np.take_along_axis(temp_col, start_col[None, :], axis=0)[0]
+    gathered_dew_c = np.take_along_axis(dew_col, start_col[None, :], axis=0)[0]
+    
+    start_p = start_pressure_hpa[column_valid] if start_pressure_hpa is not None else gathered_pres
+    start_temp_c = start_temperature_c[column_valid] if start_temperature_c is not None else gathered_temp_k - 273.15
+    start_dew_c = start_dewpoint_c[column_valid] if start_dewpoint_c is not None else gathered_dew_c
+    
+    tlcl_c, plcl_hpa = lcl_temperature_pressure(start_p, start_temp_c, start_dew_c)
+    theta = (start_temp_c + 273.15) * np.power(1000.0 / start_p, RD / CP)
+    
+    surf_es = _saturation_water_pressure_pa(start_dew_c)
+    surf_r = EPSILON * surf_es / np.clip(start_p * 100.0 - surf_es, 1e-6, None)
+    
+    parcel_temps_k = np.full_like(pres_col, np.nan, dtype=float32)
+    level_idx = np.arange(nz, dtype=int)[:, None]
+    active_mask = level_idx >= start_col[None, :]
+    dry_profile = theta[None, :] * np.power(pres_col / 1000.0, RD / CP)
+    dry_mask = active_mask & (pres_col >= plcl_hpa[None, :])
+    parcel_temps_k[dry_mask] = dry_profile[dry_mask]
+    
+    lcl_temp_k = theta * np.power(plcl_hpa / 1000.0, RD / CP)
+    prev_temp = lcl_temp_k.astype(float32)
+    prev_p = plcl_hpa.astype(float32)
+    
+    for level in range(nz):
+        p_level = pres_col[level, :]
+        active = active_mask[level, :] & (p_level < plcl_hpa) & np.isfinite(p_level)
+        if not np.any(active):
+            continue
+        next_temp = _moist_ascent_step(prev_p[active], prev_temp[active], p_level[active])
+        parcel_temps_k[level, active] = next_temp
+        prev_temp[active] = next_temp
+        prev_p[active] = p_level[active]
+    
+    mixing_ratio = np.full_like(parcel_temps_k, np.nan, dtype=float32)
+    if dry_mask.any():
+        mixing_ratio[dry_mask] = np.broadcast_to(surf_r, dry_mask.shape)[dry_mask]
+    
+    sat_mr = saturation_mixing_ratio(pres_col * 100.0, parcel_temps_k)
+    moist_mask = ~dry_mask & np.isfinite(parcel_temps_k)
+    if moist_mask.any():
+        mixing_ratio[moist_mask] = sat_mr[moist_mask]
+    
+    parcel_virtual_k = virtual_temperature(parcel_temps_k, mixing_ratio)
+    env_mixing_ratio = _mixing_ratio_from_dewpoint(pres_col, dew_col)
+    env_virtual_k = virtual_temperature(temp_col, env_mixing_ratio)
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        buoyancy = G0 * (parcel_virtual_k - env_virtual_k) / np.clip(env_virtual_k, 1e-6, None)
+    
+    if max_height_m is not None:
+        buoyancy = np.where(hgt_col <= max_height_m, buoyancy, 0.0)
+    
+    valid_profile = active_mask & np.isfinite(buoyancy) & np.isfinite(hgt_col)
+    enough = np.sum(valid_profile, axis=0) >= 2
+    
+    buoyancy = np.where(valid_profile, buoyancy, 0.0)
+    cape = np.trapz(np.clip(buoyancy, 0.0, None), hgt_col, axis=0)
+    cape = np.where(enough, cape, np.nan)
+    cape = np.clip(cape, 0.0, None)
+    
+    result = np.full(ncol, np.nan, dtype=float32)
+    result[column_valid] = cape
+    return result
+
+
+def most_unstable_cape(
+    pressure_pa: np.ndarray, temperature_k: np.ndarray, rh_percent: np.ndarray, height_m: np.ndarray
+) -> np.ndarray:
+    pressure = np.asarray(pressure_pa, dtype=float32)
+    temp_k = np.asarray(temperature_k, dtype=float32)
+    rh = np.asarray(rh_percent, dtype=float32)
+    height = np.asarray(height_m, dtype=float32)
+    
+    nz = min(pressure.shape[0], temp_k.shape[0], rh.shape[0], height.shape[0])
+    ny = min(pressure.shape[1], temp_k.shape[1], rh.shape[1], height.shape[1])
+    nx = min(pressure.shape[2], temp_k.shape[2], rh.shape[2], height.shape[2])
+    if nz < 3 or ny == 0 or nx == 0:
+        return np.full((ny, nx), np.nan, dtype=float32)
+    
+    slicer = (slice(0, nz), slice(0, ny), slice(0, nx))
+    pressure = pressure[slicer]
+    temp_k = temp_k[slicer]
+    rh = rh[slicer]
+    height = height[slicer]
+    
+    temp_c = temp_k - 273.15
+    with np.errstate(divide='ignore', invalid='ignore'):
+        gamma = np.log(np.clip(rh, 1e-6, 100.0) * 0.01) + (17.67 * temp_c) / (temp_c + 243.5)
+        dewpoint_c = (243.5 * gamma) / np.clip(17.67 - gamma, 1e-6, None)
+    
+    ncol = ny * nx
+    pres_flat = pressure.reshape(nz, ncol) / 100.0
+    temp_flat = temp_k.reshape(nz, ncol)
+    dew_flat = dewpoint_c.reshape(nz, ncol)
+    hgt_flat = height.reshape(nz, ncol)
+    
+    surf_p = pres_flat[0, :]
+    candidate_mask = pres_flat >= (surf_p - 300.0)[None, :]
+    theta_e = _equivalent_potential_temperature(pres_flat, temp_c.reshape(nz, ncol), dew_flat)
+    theta_e = np.where(candidate_mask, theta_e, np.nan)
+    
+    start_idx = np.full(ncol, -1, dtype=int)
+    has_candidate = np.any(candidate_mask & np.isfinite(theta_e), axis=0)
+    if has_candidate.any():
+        start_idx[has_candidate] = np.nanargmax(theta_e[:, has_candidate], axis=0)
+        
+    cape_flat = _parcel_cape_profiles_vectorized(pres_flat, temp_flat, dew_flat, hgt_flat, start_idx)
+    return cape_flat.reshape(ny, nx)
+
+
+def mixed_layer_cape(
+    pressure_pa: np.ndarray, temperature_k: np.ndarray, rh_percent: np.ndarray, height_m: np.ndarray
+) -> np.ndarray:
+    pressure = np.asarray(pressure_pa, dtype=float32)
+    temp_k = np.asarray(temperature_k, dtype=float32)
+    rh = np.asarray(rh_percent, dtype=float32)
+    height = np.asarray(height_m, dtype=float32)
+    
+    nz = min(pressure.shape[0], temp_k.shape[0], rh.shape[0], height.shape[0])
+    ny = min(pressure.shape[1], temp_k.shape[1], rh.shape[1], height.shape[1])
+    nx = min(pressure.shape[2], temp_k.shape[2], rh.shape[2], height.shape[2])
+    if nz < 3 or ny == 0 or nx == 0:
+        return np.full((ny, nx), np.nan, dtype=float32)
+    
+    slicer = (slice(0, nz), slice(0, ny), slice(0, nx))
+    pressure = pressure[slicer]
+    temp_k = temp_k[slicer]
+    rh = rh[slicer]
+    height = height[slicer]
+    
+    temp_c = temp_k - 273.15
+    with np.errstate(divide='ignore', invalid='ignore'):
+        gamma = np.log(np.clip(rh, 1e-6, 100.0) * 0.01) + (17.67 * temp_c) / (temp_c + 243.5)
+        dewpoint_c = (243.5 * gamma) / np.clip(17.67 - gamma, 1e-6, None)
+    
+    ncol = ny * nx
+    pres_flat = pressure.reshape(nz, ncol) / 100.0
+    temp_flat = temp_k.reshape(nz, ncol)
+    dew_flat = dewpoint_c.reshape(nz, ncol)
+    hgt_flat = height.reshape(nz, ncol)
+    
+    surf_p = pres_flat[0, :]
+    layer_mask = pres_flat >= (surf_p - 100.0)[None, :]
+    theta = temp_flat * np.power(1000.0 / pres_flat, RD / CP)
+    mixing_ratio = _mixing_ratio_from_dewpoint(pres_flat, dew_flat)
+    
+    with np.errstate(invalid='ignore'):
+        mean_theta = np.nanmean(np.where(layer_mask, theta, np.nan), axis=0)
+        mean_mr = np.nanmean(np.where(layer_mask, mixing_ratio, np.nan), axis=0)
+        mean_p = np.nanmean(np.where(layer_mask, pres_flat, np.nan), axis=0)
+    
+    start_temp_k = mean_theta * np.power(mean_p / 1000.0, RD / CP)
+    start_temp_c = start_temp_k - 273.15
+    start_dew_c = _dewpoint_from_mixing_ratio(mean_mr, mean_p)
+    
+    start_idx = np.full(ncol, -1, dtype=int)
+    has_layer = np.isfinite(mean_p) & np.isfinite(start_temp_k) & np.isfinite(start_dew_c)
+    if has_layer.any():
+        target = mean_p[has_layer]
+        pres_subset = pres_flat[:, has_layer]
+        diffs = np.abs(pres_subset - target[None, :])
+        start_idx[has_layer] = np.nanargmin(diffs, axis=0)
+        
+    cape_flat = _parcel_cape_profiles_vectorized(
+        pres_flat,
+        temp_flat,
+        dew_flat,
+        hgt_flat,
+        start_idx,
+        start_pressure_hpa=mean_p,
+        start_temperature_c=start_temp_c,
+        start_dewpoint_c=start_dew_c,
+    )
+    return cape_flat.reshape(ny, nx)
+
+
+def cape_0_3km_agl(
+    pressure_pa: np.ndarray, temperature_k: np.ndarray, rh_percent: np.ndarray, height_m: np.ndarray
+) -> np.ndarray:
+    pressure = np.asarray(pressure_pa, dtype=float32)
+    temp_k = np.asarray(temperature_k, dtype=float32)
+    rh = np.asarray(rh_percent, dtype=float32)
+    height = np.asarray(height_m, dtype=float32)
+    
+    nz = min(pressure.shape[0], temp_k.shape[0], rh.shape[0], height.shape[0])
+    ny = min(pressure.shape[1], temp_k.shape[1], rh.shape[1], height.shape[1])
+    nx = min(pressure.shape[2], temp_k.shape[2], rh.shape[2], height.shape[2])
+    if nz < 3 or ny == 0 or nx == 0:
+        return np.full((ny, nx), np.nan, dtype=float32)
+    
+    slicer = (slice(0, nz), slice(0, ny), slice(0, nx))
+    pressure = pressure[slicer]
+    temp_k = temp_k[slicer]
+    rh = rh[slicer]
+    height = height[slicer]
+    
+    temp_c = temp_k - 273.15
+    with np.errstate(divide='ignore', invalid='ignore'):
+        gamma = np.log(np.clip(rh, 1e-6, 100.0) * 0.01) + (17.67 * temp_c) / (temp_c + 243.5)
+        dewpoint_c = (243.5 * gamma) / np.clip(17.67 - gamma, 1e-6, None)
+    
+    ncol = ny * nx
+    pres_flat = pressure.reshape(nz, ncol) / 100.0
+    temp_flat = temp_k.reshape(nz, ncol)
+    dew_flat = dewpoint_c.reshape(nz, ncol)
+    hgt_flat = height.reshape(nz, ncol)
+    
+    start_idx = np.zeros(ncol, dtype=int)
+        
+    cape_flat = _parcel_cape_profiles_vectorized(
+        pres_flat,
+        temp_flat,
+        dew_flat,
+        hgt_flat,
+        start_idx,
+        max_height_m=3000.0,
+    )
+    return cape_flat.reshape(ny, nx)
+
+
 def lcl_temperature_pressure(
     pressure_hpa: float, temperature_c: float, dewpoint_c: float
 ) -> tuple[float, float]:
@@ -742,14 +999,17 @@ def _surface_based_cape_profiles_vectorized(
     return result
 
 
-def _dewpoint_from_mixing_ratio(mixing_ratio: float, pressure_hpa: float) -> float:
+def _dewpoint_from_mixing_ratio(mixing_ratio: float | np.ndarray, pressure_hpa: float | np.ndarray) -> float:
     ''' Dewpoint (°C) from mixing ratio (kg/kg) and pressure (hPa). '''
     
-    pressure_pa = pressure_hpa * 100.0
-    es = (mixing_ratio * pressure_pa) / np.clip(EPSILON + mixing_ratio, 1e-6, None)
+    mr = np.asarray(mixing_ratio, dtype=float32)
+    pres = np.asarray(pressure_hpa, dtype=float32)
+    
+    pressure_pa = pres * 100.0
+    es = (mr * pressure_pa) / np.clip(EPSILON + mr, 1e-6, None)
     es = np.clip(es, 1e-6, None)
     log_term = np.log(es / 611.2)
-    return float((243.5 * log_term) / np.clip(17.67 - log_term, 1e-6, None))
+    return (243.5 * log_term) / np.clip(17.67 - log_term, 1e-6, None)
 
 
 def _equivalent_potential_temperature(

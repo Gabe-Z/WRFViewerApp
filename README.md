@@ -20,16 +20,16 @@ For easier way to download without compiling:
 	WARNING: The file size is 238 mb due to all of the libraries and packages being included with it.
 	Also include Colortable folder in the same path as WRF_Viewer_App.exe.
 
-## Required Python packages
+## Required Python (3.11) packages
 The scripts import the following packages:
-`numpy`
-`netCDF4`
-`wrf-python`
-`matplotlib`
-`cartopy`
-`PySide6`
-NEW: `imageio`
-NEW: `imageio[ffmpeg]`
+* `numpy` - version: 1.26.4
+* `netCDF4` - version: 1.7.3
+* `wrf-python` - version: 1.4.0
+* `matplotlib` - version: 3.10.7
+* `cartopy` - version: 0.25.0
+* `PySide6` - version: 6.9.3
+* `imageio` - version: 2.37.0
+* `imageio-ffmpeg` - version: 0.6.0
 
 ## QT Error
 If you see this error: `Could not find the Qt platform plugin "xcb"`:
