@@ -271,6 +271,282 @@ def shear_vector(
     return high_u - low_u, high_v - low_v
 
 
+def wind_components_at_height_grid(
+    height_m: np.ndarray, u_wind: np.ndarray, v_wind: np.ndarray, target_height_m: float
+) -> tuple[np.ndarray, np.ndarray]:
+    ''' Interpolate u/v components (m/s) at ``target_height_m`` AGL for 3-D fields.'''
+    
+    hgt = np.asarray(height_m, dtype=float32)
+    u = np.asarray(u_wind, dtype=float32)
+    v = np.asarray(v_wind, dtype=float32)
+    
+    if hgt.ndim == 1:
+        if hgt.size < 2:
+            return np.array(np.nan, dtype=float32), np.array(np.nan, dtype=float32)
+        order = np.argsort(hgt)
+        hgt_sorted = hgt[order]
+        u_sorted = u[order]
+        v_sorted = v[order]
+        if target_height_m < hgt_sorted[0] or target_height_m > hgt_sorted[-1]:
+            return np.array(np.nan, dtype=float32), np.array(np.nan, dtype=float32)
+        u_interp = np.interp(target_height_m, hgt_sorted, u_sorted)
+        v_interp = np.interp(target_height_m, hgt_sorted, v_sorted)
+        return u_interp.astype(float32), v_interp.astype(float32)
+        
+    hgt = _enforce_monotonic_height(hgt)
+    if hgt.shape != u.shape or hgt.shape != v.shape:
+        min_levels = min(hgt.shape[0], u.shape[0], v.shape[0])
+        ny = min(hgt.shape[1], u.shape[1], v.shape[1])
+        nx = min(hgt.shape[2], u.shape[2], v.shape[2])
+        slicer = (slice(0, min_levels), slice(0, ny), slice(0, nx))
+        hgt = hgt[slicer]
+        u = u[slicer]
+        v = v[slicer]
+    
+    with np.errstate(invalid='ignore'):
+        col_max = np.nanmax(hgt, axis=0)
+    valid = col_max >= target_height_m
+    
+    mask = hgt >= target_height_m
+    has = valid & mask.any(axis=0)
+    k1 = mask.argmax(axis=0)
+    k1 = np.clip(k1, 1, hgt.shape[0] - 1)
+    k0 = k1 - 1
+    
+    row_idx = np.arange(hgt.shape[1])[:, None]
+    col_idx = np.arange(hgt.shape[2])[None, :]
+    
+    z0 = hgt[k0, row_idx, col_idx]
+    z1 = hgt[k1, row_idx, col_idx]
+    u0 = u[k0, row_idx, col_idx]
+    u1 = u[k1, row_idx, col_idx]
+    v0 = v[k0, row_idx, col_idx]
+    v1 = v[k1, row_idx, col_idx]
+    
+    denom = np.where(np.isfinite(z1 - z0) & ((z1 - z0) != 0.0), z1 - z0, np.nan)
+    w = (target_height_m - z0) / denom
+    u_interp = u0 + w * (u1 - u0)
+    v_interp = v0 + w * (v1 - v0)
+
+    u_interp = np.where(has, u_interp, np.nan)
+    v_interp = np.where(has, v_interp, np.nan)
+
+    return u_interp.astype(float32), v_interp.astype(float32)
+
+
+def _layer_mean_wind_components_grid(
+    height_m: np.ndarray, u_wind: np.ndarray, v_wind: np.ndarray, bottom_m: float, top_m: float
+) -> tuple[np.ndarray, np.ndarray]:
+    ''' Mean u/v components within [bottom_m, top_m] AGL for 3-D fields. '''
+    
+    hgt = np.asarray(height_m, dtype=float32)
+    u = np.asarray(u_wind, dtype=float32)
+    v = np.asarray(v_wind, dtype=float32)
+    
+    if hgt.ndim != 3:
+        return np.array(np.nan, dtype=float32), np.array(np.nan, dtype=float32)
+    
+    if hgt.shape != u.shape or hgt.shape != v.shape:
+        min_levels = min(hgt.shape[0], u.shape[0], v.shape[0])
+        ny = min(hgt.shape[1], u.shape[1], v.shape[1])
+        nx = min(hgt.shape[2], u.shape[2], v.shape[2])
+        slicer = (slice(0, min_levels), slice(0, ny), slice(0, nx))
+        hgt = hgt[slicer]
+        u = u[slicer]
+        v = v[slicer]
+    
+    hgt = _enforce_monotonic_height(hgt)
+    
+    z0 = hgt[:-1]
+    z1 = hgt[1:]
+    u0 = u[:-1]
+    u1 = u[1:]
+    v0 = v[:-1]
+    v1 = v[1:]
+    
+    seg_bottom = np.maximum(z0, bottom_m)
+    seg_top = np.minimum(z1, top_m)
+    overlap = np.clip(seg_top - seg_bottom, 0.0, None)
+    
+    seg_u = 0.5 * (u0 + u1)
+    seg_v = 0.5 * (v0 + v1)
+    
+    valid_u = np.isfinite(seg_u) & np.isfinite(overlap)
+    valid_v = np.isfinite(seg_v) & np.isfinite(overlap)
+    
+    accum_u = np.nansum(np.where(valid_u, seg_u * overlap, 0.0), axis=0)
+    accum_v = np.nansum(np.where(valid_v, seg_v * overlap, 0.0), axis=0)
+    total_u = np.nansum(np.where(valid_u, overlap, 0.0), axis=0)
+    total_v = np.nansum(np.where(valid_v, overlap, 0.0), axis=0)
+    
+    mean_u = np.where(total_u > 0.0, accum_u / total_u, np.nan)
+    mean_v = np.where(total_v > 0.0, accum_v / total_v, np.nan)
+
+    return mean_u.astype(float32), mean_v.astype(float32)
+
+
+def bunkers_storm_motion_grid(
+    height_m: np.ndarray, u_wind: np.ndarray, v_wind: np.ndarray
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    '''
+    Compute Bunkers storm motions (m/s) for left-, mean-, and right-movers on grids.
+    '''
+    
+    hgt = np.asarray(height_m, dtype=float32)
+    u = np.asarray(u_wind, dtype=float32)
+    v = np.asarray(v_wind, dtype=float32)
+    
+    mean_u, mean_v = _layer_mean_wind_components_grid(hgt, u, v, 0.0, 6000.0)
+    lower_u, lower_v = _layer_mean_wind_components_grid(hgt, u, v, 0.0, 500.0)
+    upper_u, upper_v = _layer_mean_wind_components_grid(hgt, u, v, 5500.0, 6000.0)
+    
+    shear_u = upper_u - lower_u
+    shear_v = upper_v - lower_v
+    shear_mag = np.hypot(shear_u, shear_v)
+    
+    valid = (
+        np.isfinite(mean_u)
+        & np.isfinite(mean_v)
+        & np.isfinite(lower_u)
+        & np.isfinite(lower_v)
+        & np.isfinite(upper_u)
+        & np.isfinite(upper_v)
+        & (shear_mag > 1e-6)
+    )
+    
+    right_unit_u = np.where(valid, shear_v / shear_mag, np.nan)
+    right_unit_v = np.where(valid, -shear_u / shear_mag, np.nan)
+    left_unti_u = np.where(valid, -shear_v / shear_mag, np.nan)
+    left_unit_v = np.where(valid, shear_u  / shear_mag, np.nan)
+    
+    dev = 7.5
+    rm_u = np.where(valid, mean_u + dev * right_unit_u, np.nan)
+    rm_v = np.where(valid, mean_v + dev * right_unit_v, np.nan)
+    lm_u = np.where(valid, mean_u + dev * left_unti_u, np.nan)
+    lm_v = np.where(valid, mean_v + dev * left_unit_v, np.nan)
+    
+    mw_u = np.where(np.isfinite(mean_u), mean_u, np.nan)
+    mw_v = np.where(np.isfinite(mean_v), mean_v, np.nan)
+
+    return {'LM': (lm_u, lm_v), 'MW': (mw_u, mw_v), 'RM': (rm_u, rm_v)}
+
+
+def storm_relative_helicity(
+    height_m: np.ndarray,
+    u_wind: np.ndarray,
+    v_wind: np.ndarray,
+    *, 
+    bottom_m: float = 0.0,
+    top_m: float = 1000.0,
+    storm_u: np.ndarray | None = None,
+    storm_v: np.ndarray | None = None,
+) -> np.ndarray:
+    '''
+    Storm-relative helicity (m^2/s^-2) between ``bottom_m`` and ``top`` AGL.
+    '''
+    
+    hgt = np.asarray(height_m, dtype=float32)
+    u = np.asarray(u_wind, dtype=float32)
+    v = np.asarray(v_wind, dtype=float32)
+    
+    if hgt.shape != u.shape or hgt.shape != v.shape:
+        min_levels = min(hgt.shape[0], u.shape[0], v.shape[0])
+        ny = min(hgt.shape[1], u.shape[1], v.shape[1])
+        nx = min(hgt.shape[2], u.shape[2], v.shape[2])
+        slicer = (slice(0, min_levels), slice(0, ny), slice(0, nx))
+        hgt = hgt[slicer]
+        u = u[slicer]
+        v = v[slicer]
+    
+    hgt = _enforce_monotonic_height(hgt)
+    
+    if storm_u is None or storm_v is None:
+        motion = bunkers_storm_motion_grid(hgt, u, v)
+        storm_u, storm_v = motion['RM']
+    
+    storm_u = np.asarray(storm_u, dtype=float32)
+    storm_v = np.asarray(storm_v, dtype=float32)
+    
+    z0 = hgt[:-1]
+    z1 = hgt[1:]
+    u0 = u[:-1]
+    u1 = u[1:]
+    v0 = v[:-1]
+    v1 = v[1:]
+    
+    denom = np.where(np.isfinite(z1 - z0) & ((z1 - z0) != 0.0), z1 - z0, np.nan)
+    seg_bottom = np.maximum(z0, bottom_m)
+    seg_top = np.minimum(z1, top_m)
+    overlap = seg_top - seg_bottom
+    
+    start_frac = (seg_bottom - z0) / denom
+    end_frac = (seg_top - z0) / denom
+    
+    u_lower = u0 + start_frac * (u1 - u0)
+    v_lower = v0 + start_frac * (v1 - v0)
+    u_upper = u0 + end_frac * (u1 - u0)
+    v_upper = v0 + end_frac * (v1 - v0)
+    
+    delta_u = u_upper - u_lower
+    delta_v = v_upper - v_lower
+    
+    valid = (
+        np.isfinite(overlap)
+        & (overlap > 0.0)
+        & np.isfinite(u_lower)
+        & np.isfinite(v_lower)
+        & np.isfinite(delta_u)
+        & np.isfinite(delta_v)
+        & np.isfinite(storm_u)
+        & np.isfinite(storm_v)
+    )
+    
+    storm_u_2d = storm_u[None, :, :]
+    storm_v_2d = storm_v[None, :, :]
+    contrib = (v_lower - storm_v_2d) * delta_u - (u_lower - storm_v_2d) * delta_v
+    contrib = np.where(valid, contrib, 0.0)
+    
+    srh = np.sum(contrib, axis=0)
+    srh = np.where(np.any(valid, axis=0), srh, np.nan)
+    return srh.astype(float32)
+
+
+def bulk_shear_magnitude(
+    height_m: np.ndarray,
+    u_wind: np.ndarray,
+    v_wind: np.ndarray,
+    *,
+    bottom_m: float = 0.0,
+    top_m: float = 1000.0,
+) -> np.ndarray:
+    '''
+    Bulk shear magnitude (m/s) between ``bottom_m`` and ``top_m`` AGL.
+    '''
+    
+    low_u, low_v = wind_components_at_height_grid(height_m, u_wind, v_wind, bottom_m)
+    high_u, high_v = wind_components_at_height_grid(height_m, u_wind, v_wind, top_m)
+    with np.errstate(invalid='ignore'):
+        shear_mag = np.hypot(high_u - low_u, high_v - low_v)
+    return np.asarray(shear_mag, dtype=float32)
+
+
+def bulk_shear_vector(
+    height_m: np.ndarray,
+    u_wind: np.ndarray,
+    v_wind: np.ndarray,
+    *,
+    bottom_m: float = 0.0,
+    top_m: float = 1000.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    '''
+    Bulk shear vector components (m/s) between ``bottom_m`` and ``top_m`` AGL.
+    '''
+    
+    low_u, low_v = wind_components_at_height_grid(height_m, u_wind, v_wind, bottom_m)
+    high_u, high_v = wind_components_at_height_grid(height_m, u_wind, v_wind, top_m)
+    return (high_u - low_u).astype(float32), (high_v - low_v).astype(float32)
+
+
 def _saturation_water_pressure_pa(temp_c: float | np.ndarray) -> np.ndarray:
     ''' Saturation vapor pressure over liquid water (PA) via Tetens formula. '''
     
@@ -1550,6 +1826,44 @@ def uh_minimum_for_spacing(dx_m: float | None, dy_m: float | None) -> float:
     return float(np.clip(225.0 / spacing_km, 1.0, None))
 
 
+def uh_max_value_for_spacing(dx_m: float | None, dy_m: float | None, base_max_3km: float) -> float:
+    '''
+    Resolution-aware maximum updraft helicity range value (m^2 s^-2).
+    
+    The ``base_max_3km`` value corresponds to a 3 km grid; values scale
+    inversely with grid spacing so finer domains get higher maxima while
+    coarser domains get lower maxima.
+    '''
+    
+    dx_km = np.nan
+    if dx_m is not None:
+        dx_km = float(dx_m) / 1000.0
+    dy_m = np.nan
+    if dy_m is not None:
+        dy_km = float(dy_m) / 1000.0
+    
+    spacing_km = np.nanmean([v for v in (dx_km, dy_km) if np.isfinite(v)])
+    if not np.isfinite(spacing_km) or spacing_km <= 0.0:
+        return float(base_max_3km)
+    
+    return float((base_max_3km * 3.0) / spacing_km)
+
+
+def uh_time_max(fields: list[np.ndarray]) -> np.ndarray:
+    '''
+    Compute a time-window maximum for updraft helicity fields, ignoring NaNs.
+    '''
+    
+    finite = [np.asarray(field) for field in fields if field is not None]
+    if not finite:
+        return np.array([], dtype=float32)
+    
+    stack = np.stack(finite, axis=0)
+    with np.errstate(invalid='ignore'):
+        result = np.nanmax(stack, axis=0)
+    return np.asarray(result, dtype=float32)
+
+
 def calc_wind_gust_mph(nc: Dataset, time_index: int) -> np.ndarray:
     ''' 10 m wind gust (mph) from WSPD10MAX (m/s). '''
     
@@ -1710,6 +2024,109 @@ def calc_updraft_helicity(
     uh = np.asarray(uh, dtype=float32)
     
     return uh
+
+
+def calc_updraft_helicity_times(
+    nc: Dataset,
+    time_indices: list[int],
+    *,
+    bottom_m: float = 2000.0,
+    top_m: float = 5000.0,
+) -> list[np.ndarray]:
+    '''
+    Updraft helicity (m^2 s^-2) for multiple times between ``bottom_m`` and ``top_m`` AGL.
+    
+    Computes fields for the requested time indices in a single pass.
+    '''
+    
+    if not time_indices:
+        return []
+        
+    required = ['U', 'V', 'W', 'PH', 'PHB', 'HGT']
+    missing = [name for name in required if name not in nc.variables]
+    if missing:
+        raise RuntimeError(f'Missing variables for updraft helicity: {", ".join(missing)}')
+    
+    def _slice_time_var(var_obj, indices: list[int]) -> np.ndarray:
+        dims = tuple(getattr(var_obj, 'dimensions', ()))
+        if 'Time' in dims:
+            axis = dims.index('Time')
+            slicer = [slice(None)] * var_obj.ndim
+            slicer[axis] = indices
+            data = np.array(var_obj[tuple(slicer)])
+        else:
+            data = np.array(var_obj[:])
+        return data
+    
+    u_stag = _slice_time_var(nc.variables['U'], time_indices)
+    v_stag = _slice_time_var(nc.variables['V'], time_indices)
+    w_stag = _slice_time_var(nc.variables['W'], time_indices)
+    
+    u = destagger(u_stag, axis=-1).astype(float32)
+    v = destagger(v_stag, axis=-2).astype(float32)
+    w = destagger(w_stag, axis=1).astype(float32)
+    
+    ph = _slice_time_var(nc.variables['PH'], time_indices)
+    phb = _slice_time_var(nc.variables['PHB'], time_indices)
+    geo = ph + phb
+    geo_mass = destagger(geo, axis=1)
+    height = (geo_mass / 9.81).astype(float32)
+    
+    hgt_var = nc.variables['HGT']
+    h_dims = tuple(getattr(hgt_var, 'dimensions', ()))
+    if 'Time' in h_dims:
+        hgt = np.array(hgt_var[time_indices, :, :], dtype=float32)
+    else:
+        hgt = np.array(hgt_var[:, :], dtype=float32)
+    
+    z_agl = height - hgt[:, None, :, :]
+    
+    vert_depths = [u.shape[1], v.shape[1], w.shape[1], z_agl.shape[1]]
+    common_levels = min(vert_depths)
+    if common_levels < 2:
+        return [np.full(z_agl[0, 0], np.nan, dtype=float32) for _ in time_indices]
+    
+    u = u[:, :common_levels]
+    v = v[:, :common_levels]
+    w = w[:, :common_levels]
+    z_agl = z_agl[:, :common_levels]
+    
+    dx = getattr(nc, 'DX', np.nan)
+    dy = getattr(nc, 'DY', np.nan)
+    spacing_dx = float(dx) if np.isfinite(dx) else np.nan
+    spacing_dy = float(dy) if np.isfinite(dy) else np.nan
+    
+    if not np.isfinite(spacing_dx) or spacing_dx <= 0.0:
+        spacing_dx = np.nanmean(np.diff(nc.variables['XLONG'][0, 0, :]))
+        spacing_dx = spacing_dx * 111320.0 * np.cos(np.deg2rad(np.nanmean(nc.variables['XLAT'][0, :, :]))) if np.isfinite(spacing_dx) else np.nan
+    
+    if not np.isfinite(spacing_dy) or spacing_dy <= 0.0:
+        spacing_dy = np.nanmean(np.diff(nc.variables['XLAT'][0, :, 0]))
+        spacing_dy = spacing_dy * 111320.0 if np.isfinite(spacing_dy) else np.nan
+    
+    if not np.isfinite(spacing_dx) or spacing_dx <= 0.0:
+        spacing_dx = 3000.0
+    if not np.isfinite(spacing_dy) or spacing_dy <= 0.0:
+        spacing_dy = 3000.0
+    
+    dvdx = np.gradient(v, spacing_dx, axis=-1)
+    dudy = np.gradient(u, spacing_dy, axis=-2)
+    rel_vort = dvdx - dudy
+    
+    layer_mask = (z_agl >= bottom_m) & (z_agl <= top_m)
+    integrand = np.where(layer_mask, rel_vort * w, np.nan)
+    layer_heights = np.where(layer_mask, z_agl, np.nan)
+    
+    valid_pairs = np.isfinite(integrand[:, 1:]) & np.isfinite(integrand[:, :-1])
+    valid_pairs &= np.isfinite(layer_heights[:, 1:]) & np.isfinite(layer_mask[:, :-1])
+    
+    delta_h = np.where(valid_pairs, layer_heights[:, 1:] - layer_heights[:, :-1], 0.0)
+    avg_integrand = np.where(valid_pairs, 0.5 * (integrand[:, 1:] + integrand[:, :-1]), 0.0)
+    
+    uh = np.sum(avg_integrand * delta_h, axis=1)
+    uh = np.where(valid_pairs.any(axis=1), uh, np.nan)
+    
+    return [np.asarray(field, dtype=float32) for field in uh]
 
 
 def ensure_pressure_orientation(

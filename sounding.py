@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import platform
 import sys
+import pathlib
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -47,8 +48,8 @@ from calc import (
 
 def _app_root() -> Path:
     if getattr(sys, 'frozen', False):
-        return(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
+        return pathlib.Path(sys.executable).resolve().parent
+    return pathlib.Path(__file__).resolve().parent
 
 
 def _standard_atmosphere_pressure(height_m: float) -> float:

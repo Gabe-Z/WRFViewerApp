@@ -19,6 +19,7 @@ Pack to an EXE (Windows) or app bundle (macOS) with PyInstaller, see bottom of f
 from __future__ import annotations
 import os
 import sys
+import pathlib
 
 # Force Windows Platform (Fixes the xcb error)
 if getattr(sys, 'frozen', False):
@@ -92,8 +93,8 @@ from wrf import to_np # getvar, latlon_coords, ALL_TIMES, interplevel
 
 def _app_root() -> Path:
     if getattr(sys, 'frozen', False):
-        return(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
+        return pathlib.Path(sys.executable).resolve().parent
+    return pathlib.Path(__file__).resolve().parent
 
 
 from sounding import SoundingWindow
@@ -114,10 +115,15 @@ from calc import (
     ptype_rate_offset,
     ptype_rate_from_offset,
     calc_updraft_helicity,
+    calc_updraft_helicity_times,
+    uh_max_value_for_spacing,
     uh_minimum_for_spacing,
+    uh_time_max,
     snowfall_support,
     surface_based_cape,
     surface_based_cape_from_profile,
+    storm_relative_helicity,
+    bulk_shear_vector,
     slice_time_var,
     most_unstable_cape,
     mixed_layer_cape,
@@ -182,13 +188,47 @@ class ReflectivityUHOverlays:
 
 
 UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
+    'HGT200': UpperAirSpec(
+        canonical='HGT200',
+        display_name='200 mb Height, Wind',
+        level_hpa=200.0,
+        shading_field='wspd',
+        colorbar_label='Wind Speed (kt)',
+        vmin=50,
+        vmax=170.0,
+        contour_field='height',
+        contour_levels=np.arange(1050.0, 1250.1, 6.0),
+        contour_color='black',
+        contour_width=0.9,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='200 hPa Height & Wind',
+    ),
+    'HGT300': UpperAirSpec(
+        canonical='HGT300',
+        display_name='300 mb Height, Wind',
+        level_hpa=300.0,
+        shading_field='wspd',
+        colorbar_label='Wind Speed (kt)',
+        vmin=50,
+        vmax=170.0,
+        contour_field='height',
+        contour_levels=np.arange(800.0, 1000.1, 6.0),
+        contour_color='black',
+        contour_width=0.9,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='300 hPa Height & Wind',
+    ),
     'HGT500': UpperAirSpec(
         canonical='HGT500',
         display_name='500 mb Height, Wind',
         level_hpa=500.0,
         shading_field='wspd',
         colorbar_label='Wind Speed (kt)',
-        vmin=0,
+        vmin=20,
         vmax=140.0,
         contour_field='height',
         contour_levels=np.arange(480.0, 600.1, 6.0),
@@ -198,6 +238,108 @@ UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
         barb_length=5.5,
         barb_color='black',
         title='500 hPa Height & Wind',
+    ),
+    'HGT700': UpperAirSpec(
+        canonical='HGT700',
+        display_name='700 mb Height, Wind',
+        level_hpa=700.0,
+        shading_field='wspd',
+        colorbar_label='Wind Speed (kt)',
+        vmin=20,
+        vmax=80.0,
+        contour_field='height',
+        contour_levels=np.arange(230.0, 350.1, 6.0),
+        contour_color='black',
+        contour_width=0.9,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='700 hPa Height & Wind',
+    ),
+    'HGT850': UpperAirSpec(
+        canonical='HGT850',
+        display_name='850 mb Height, Wind',
+        level_hpa=850.0,
+        shading_field='wspd',
+        colorbar_label='Wind Speed (kt)',
+        vmin=20,
+        vmax=80.0,
+        contour_field='height',
+        contour_levels=np.arange(100.0, 175.1, 6.0),
+        contour_color='black',
+        contour_width=0.9,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='850 hPa Height & Wind',
+    ),
+    'HGT925': UpperAirSpec(
+        canonical='HGT925',
+        display_name='925 mb Height, Wind',
+        level_hpa=925.0,
+        shading_field='wspd',
+        colorbar_label='Wind Speed (kt)',
+        vmin=20,
+        vmax=80.0,
+        contour_field='height',
+        contour_levels=np.arange(50.0, 100.1, 6.0),
+        contour_color='black',
+        contour_width=0.9,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='925 hPa Height & Wind',
+    ),
+    'RH200': UpperAirSpec(
+        canonical='RH200',
+        display_name='200 mb Relative Humidity, Wind',
+        level_hpa=200.0,
+        shading_field='rh',
+        colorbar_label='200 hPa Relative Humidity (%)',
+        vmin=0.0,
+        vmax=100.0,
+        contour_field='height',
+        contour_levels=np.arange(1050.0, 1250.1, 6.0),
+        contour_color='black',
+        contour_width=0.8,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='200 hPa Relative Humidity & Wind',
+    ),
+    'RH300': UpperAirSpec(
+        canonical='RH300',
+        display_name='300 mb Relative Humidity, Wind',
+        level_hpa=300.0,
+        shading_field='rh',
+        colorbar_label='300 hPa Relative Humidity (%)',
+        vmin=0.0,
+        vmax=100.0,
+        contour_field='height',
+        contour_levels=np.arange(800.0, 1000.1, 6.0),
+        contour_color='black',
+        contour_width=0.8,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='300 hPa Relative Humidity & Wind',
+    ),
+    'RH500': UpperAirSpec(
+        canonical='RH500',
+        display_name='500 mb Relative Humidity, Wind',
+        level_hpa=500.0,
+        shading_field='rh',
+        colorbar_label='500 hPa Relative Humidity (%)',
+        vmin=0.0,
+        vmax=100.0,
+        contour_field='height',
+        contour_levels=np.arange(480.0, 600.1, 6.0),
+        contour_color='black',
+        contour_width=0.8,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='500 hPa Relative Humidity & Wind',
     ),
     'RH700': UpperAirSpec(
         canonical='RH700',
@@ -216,6 +358,74 @@ UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
         barb_color='black',
         title='700 hPa Relative Humidity & Wind',
     ),
+    'RH850': UpperAirSpec(
+        canonical='RH850',
+        display_name='850 mb Relative Humidity, Wind',
+        level_hpa=850.0,
+        shading_field='rh',
+        colorbar_label='850 hPa Relative Humidity (%)',
+        vmin=0.0,
+        vmax=100.0,
+        contour_field='height',
+        contour_levels=np.arange(100.0, 175.1, 6.0),
+        contour_color='black',
+        contour_width=0.8,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='850 hPa Relative Humidity & Wind',
+    ),
+    'RH925': UpperAirSpec(
+        canonical='RH925',
+        display_name='925 mb Relative Humidity, Wind',
+        level_hpa=925.0,
+        shading_field='rh',
+        colorbar_label='925 hPa Relative Humidity (%)',
+        vmin=0.0,
+        vmax=100.0,
+        contour_field='height',
+        contour_levels=np.arange(50.0, 100.1, 6.0),
+        contour_color='black',
+        contour_width=0.8,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='925 hPa Relative Humidity & Wind',
+    ),
+    'TEMP500': UpperAirSpec(
+        canonical='TEMP500',
+        display_name='500 mb Temperature, Wind',
+        level_hpa=500.0,
+        shading_field='temperature',
+        colorbar_label='500 hPa Temperature (°C)',
+        vmin=-71.1,
+        vmax=28.9,
+        contour_field='height',
+        contour_levels=np.arange(480.0, 600.1, 3.0),
+        contour_color='black',
+        contour_width=1.0,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='500 hPa Temperature & Wind',
+    ),
+    'TEMP700': UpperAirSpec(
+        canonical='TEMP700',
+        display_name='700 mb Temperature, Wind',
+        level_hpa=700.0,
+        shading_field='temperature',
+        colorbar_label='700 hPa Temperature (°C)',
+        vmin=-51.1,
+        vmax=48.9,
+        contour_field='height',
+        contour_levels=np.arange(230.0, 350.1, 3.0),
+        contour_color='black',
+        contour_width=1.0,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='700 hPa Temperature & Wind',
+    ),
     'TEMP850': UpperAirSpec(
         canonical='TEMP850',
         display_name='850 mb Temperature, Wind',
@@ -232,6 +442,23 @@ UPPER_AIR_SPECS: dict[str, UpperAirSpec] = {
         barb_length=5.5,
         barb_color='black',
         title='850 hPa Temperature & Wind',
+    ),
+    'TEMP925': UpperAirSpec(
+        canonical='TEMP925',
+        display_name='925 mb Temperature, Wind',
+        level_hpa=925.0,
+        shading_field='temperature',
+        colorbar_label='925 hPa Temperature (°C)',
+        vmin=-51.1,
+        vmax=48.9,
+        contour_field='height',
+        contour_levels=np.arange(50.0, 100.1, 3.0),
+        contour_color='black',
+        contour_width=1.0,
+        barb_stride=16,
+        barb_length=5.5,
+        barb_color='black',
+        title='925 hPa Temperature & Wind',
     ),
 }
 
@@ -252,6 +479,8 @@ class WRFLoader(QtCore.QObject):
         self._upper_base_cache: OrderedDict[tuple[str, int], dict[str, np.ndarray]] = OrderedDict()
         self._upper_base_cache_limit: int = 3
         self._uh_threshold_cache: dict[str, float] = {}
+        self._uh_range_cache: dict[tuple[str, float], float] = {}
+        self._uh_run_max_last_index: int = -1
     
     @staticmethod
     def _align_xy(*arrays: np.ndarray) -> list[np.ndarray]:
@@ -425,6 +654,8 @@ class WRFLoader(QtCore.QObject):
         self._pressure_orientation.clear()
         self._upper_base_cache.clear()
         self._uh_threshold_cache.clear()
+        self._uh_range_cache.clear()
+        self._uh_run_max_last_index = -1
         
     # --- Geometry ---
     def get_geo(self, frame: WRFFrame) -> tuple[np.ndarray, np.ndarray]:
@@ -456,6 +687,19 @@ class WRFLoader(QtCore.QObject):
         threshold = uh_minimum_for_spacing(dx, dy)
         self._uh_threshold_cache[frame_path] = threshold
         return threshold
+    
+    def _uh_range_max(self, frame_path: str, base_max_3km: float) -> float:
+        key = (frame_path, base_max_3km)
+        cached = self._uh_range_cache.get(key)
+        if cached is not None:
+            return cached
+        
+        with Dataset(frame_path) as nc:
+            dx = getattr(nc, 'DX', None)
+            dy = getattr(nc, 'DY', None)
+        max_value = uh_max_value_for_spacing(dx, dy, base_max_3km)
+        self._uh_range_cache[key] = max_value
+        return max_value
     
     def _get_upper_base_fields(self, frame: WRFFrame) -> dict[str, np.ndarray]:
         key = (frame.path, frame.time_index)
@@ -828,36 +1072,154 @@ class WRFLoader(QtCore.QObject):
         self._cache[key] = uh.astype(float32)
         return self._cache[key]
     
-    def _uh_max_last_hour(self, target_idx: int) -> np.ndarray:
+    def _uh_field_0_3(self, frame: WRFFrame) -> np.ndarray:
+        key = (frame.path, 'UH0TO3', frame.time_index)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        
+        with Dataset(frame.path) as nc:
+            uh = calc_updraft_helicity(nc, frame.time_index, bottom_m=0.0, top_m=3000.0)
+        self._cache[key] = uh.astype(float32)
+        return self._cache[key]
+    
+    def _uh_max_2_5_base(self, frame: WRFFrame) -> np.ndarray:
+        key = (frame.path, 'UHMAX25_BASE', frame.time_index)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+            
+        with Dataset(frame.path) as nc:
+            if 'UP_HELI_MAX' in nc.variables:
+                uh = slice_time_var(nc.variables['UP_HELI_MAX'], frame.time_index)
+                self._cache[key] = np.asarray(uh, dtype=float32)
+                return self._cache[key]
+        
+        uh = self._uh_field(frame)
+        self._cache[key] = np.asarray(uh, dtype=float32)
+        return self._cache[key]
+    
+    def _uh_max_2_5_1hr(self, target_idx: int) -> np.ndarray:
+        return self._uh_max_over_hours(
+            target_idx,
+            hours=1.0,
+            field_provider=lambda idx: self._uh_max_2_5_base(self.frames[idx]),
+            cache_key='UHMAX25_1HR',
+        )
+    
+    def _uh_run_max_0_3(self, target_idx: int) -> np.ndarray:
         frame = self.frames[target_idx]
-        key = (frame.path, 'UHMAX1HR', frame.time_index)
+        key = (frame.path, 'UHMAX03_RUN', frame.time_index)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        
+        last_idx = self._uh_run_max_last_index
+        prev_run = None
+        if last_idx >= 0:
+            last_frame = self.frames[last_idx]
+            prev_key = (last_frame.path, 'UHMAX03_RUN', last_frame.time_index)
+            prev_run = self._cache.get(prev_key)
+        
+        idx = last_idx + 1
+        while idx <= target_idx:
+            fr = self.frames[idx]
+            path = fr.path
+            times: list[int] = []
+            indices: list[int] = []
+            while idx <= target_idx and self.frames[idx].path == path:
+                times.append(self.frames[idx].time_index)
+                indices.append(idx)
+                idx += 1
+            
+            with Dataset(path) as nc:
+                uh_fields = calc_updraft_helicity_times(nc, times, bottom_m=0.0, top_m=3000.0)
+            
+            uh_stack = np.stack([np.asarray(field, dtype=float32) for field in uh_fields], axis=0)
+            if prev_run is not None:
+                aligned = self._align_xy(prev_run, uh_stack[0])
+                prev_run = aligned[0]
+                uh_stack = uh_stack[:, : prev_run.shape[0], : prev_run.shape[1]]
+                start_stack = np.concatenate([prev_run[None, ...], uh_stack], axis=0)
+                run_stack = np.fmax.accumulate(start_stack, axis=0)[1:]
+            else:
+                run_stack = np.fmax.accumulate(uh_stack, axis=0)
+            
+            for offset, (fr_idx, time_idx) in enumerate(zip(indices, times)):
+                uh_key = (path, 'UH0TO3', time_idx)
+                if uh_key not in self._cache:
+                    self._cache[uh_key] = uh_stack[offset]
+                
+                run_key = (path, 'UHMAX03_RUN', time_idx)
+                self._cache[run_key] = run_stack[offset]
+                prev_run = self._cache[run_key]
+                self._uh_run_max_last_index = fr_idx
+        
+        return self._cache[key]
+    
+    def _uh_run_max_2_5(self, target_idx: int) -> np.ndarray:
+        frame = self.frames[target_idx]
+        key = (frame.path, 'UHMAX25_RUN', frame.time_index)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        
+        current = self._uh_max_2_5_base(frame)
+        if target_idx == 0:
+            result = current
+        else:
+            prev = self._uh_run_max_2_5(target_idx - 1)
+            aligned = self._align_xy(prev, current)
+            result = uh_time_max(aligned)
+        
+        self._cache[key] = np.asarray(result, dtype=float32)
+        return self._cache[key]
+    
+    def _uh_max_over_hours(
+        self,
+        target_idx: int,
+        *,
+        hours: float | None,
+        field_provider: T.Callable[[int], np.ndarray],
+        cache_key: str,
+    ) -> np.ndarray:
+        frame = self.frames[target_idx]
+        key = (frame.path, cache_key, frame.time_index)
         cached = self._cache.get(key)
         if cached is not None:
             return cached
         
         target_time = frame.timestamp
-        lower_bound = target_time - timedelta(hours=1) if target_time else None
+        lower_bound = None
+        single_only = False
+        if hours is not None:
+            if target_time is None:
+                single_only = True
+            else:
+                lower_bound = target_time - timedelta(hours=hours)
         
-        uh_fields: list[np.ndarray] = []
+        fields: list[np.ndarray] = []
         for idx in range(target_idx, -1, -1):
             fr = self.frames[idx]
             if lower_bound is not None and fr.timestamp is not None and fr.timestamp < lower_bound:
                 break
-            uh_fields.append(self._uh_field(fr))
-            if lower_bound is None:
+            fields.append(field_provider(idx))
+            if single_only:
                 break
         
-        aligned = self._align_xy(*uh_fields)
-        finite = [arr for arr in aligned if arr is not None]
-        if not finite:
-            result = np.array([], dtype=float32)
-        else:
-            stack = np.stack(finite, axis=0)
-            with np.errstate(invalid='ignore'):
-                result = np.nanmax(stack, axis=0)
+        aligned = self._align_xy(*fields)
+        result = uh_time_max(aligned)
         
         self._cache[key] = result.astype(float32, copy=False)
         return self._cache[key]
+    
+    def _uh_max_last_hour(self, target_idx: int) -> np.ndarray:
+        return self._uh_max_over_hours(
+            target_idx,
+            hours=1.0,
+            field_provider=lambda idx: self._uh_field_0_3(self.frames[idx]),
+            cache_key='UHMAX03_1HR',
+        )
     
     def _reflectivity_with_uh(self, frame: WRFFrame) -> ReflectivityUHOverlays:
         try:
@@ -897,9 +1259,6 @@ class WRFLoader(QtCore.QObject):
             raise RuntimeError(f'Missing shading field "{spec.shading_field}" for {var}.')
         scalar2d = interp_to_pressure(scalar3d, pressure, spec.level_hpa, frame.path, self._pressure_orientation)
         
-        if spec.canonical == 'HGT500':
-            scalar2d = scalar2d * MPS_TO_KT
-        
         contour2d = None
         if spec.contour_field:
             contour3d = base_fields.get(spec.contour_field)
@@ -912,9 +1271,10 @@ class WRFLoader(QtCore.QObject):
         u2d = interp_to_pressure(base_fields['u'], pressure, spec.level_hpa, frame.path, self._pressure_orientation)
         v2d = interp_to_pressure(base_fields['v'], pressure, spec.level_hpa, frame.path, self._pressure_orientation)
         
-        if spec.canonical == 'HGT500':
-            u2d = u2d * MPS_TO_KT
-            v2d = v2d * MPS_TO_KT
+        u2d = u2d * MPS_TO_KT
+        v2d = v2d * MPS_TO_KT
+        if spec.shading_field == 'wspd':
+            scalar2d = np.hypot(u2d, v2d)
         
         data = UpperAirData(
             scalar=scalar2d.astype(float32),
@@ -952,6 +1312,13 @@ class WRFLoader(QtCore.QObject):
         if key in self._cache:
             return self._cache[key]
         
+        target_idx = None
+        if v in ('UHMAX', 'UHMAX251HR', 'UHMAX253HR', 'UHMAX25'):
+            try:
+                target_idx = self.frames.index(frame)
+            except ValueError:
+                raise RuntimeError('Frame not found for updraft helicity calculations.')
+        
         with Dataset(frame.path) as nc:
             if v in ('MDBZ', 'MAXDBZ'):
                 # Compute MDBZ as column max of reflectivity (no wrf.getvar to avoid pickling)
@@ -979,6 +1346,19 @@ class WRFLoader(QtCore.QObject):
                     raise RuntimeError(f'Reflectivity shape {arr.shape} not understood for MDBZ')
             elif v == 'MDBZ_1HRUH':
                 data2d = self._reflectivity_with_uh(frame)
+            elif v == 'UHMAX':
+                data2d = self._uh_run_max_0_3(target_idx)
+            elif v == 'UHMAX251HR':
+                data2d = self._uh_max_2_5_1hr(target_idx)
+            elif v == 'UHMAX253HR':
+                data2d = self._uh_max_over_hours(
+                    target_idx,
+                    hours=3.0,
+                    field_provider=self._uh_max_2_5_1hr,
+                    cache_key='UHMAX25_3HR',
+                )
+            elif v == 'UHMAX25':
+                data2d = self._uh_run_max_2_5(target_idx)
             elif v == 'RAINNC':
                 data2d = np.array(nc.variables['RAINNC'][frame.time_index, :, :])
             elif v == 'RAINC':
@@ -1175,6 +1555,53 @@ class WRFLoader(QtCore.QObject):
                     data2d = mixed_layer_cape(pressure, temp_k, rh, height)
                 else:
                     data2d = cape_0_3km_agl(pressure, temp_k, rh, height)
+            elif v in ('BSH01', 'BSH03', 'BSH06', 'SRH01', 'SRH03'):
+                base_fields = self._get_upper_base_fields(frame)
+                height = base_fields['height']
+                u_wind = base_fields['u']
+                v_wind = base_fields['v']
+                
+                orient = ensure_pressure_orientation(
+                    frame.path, base_fields['pressure'], self._pressure_orientation
+                )
+                if orient == 'ascending':
+                    height = height[::-1, :, :]
+                    u_wind = u_wind[::-1, :, :]
+                    v_wind = v_wind[::-1, :, :]
+                
+                if 'HGT' not in nc.variables:
+                    raise RuntimeError('HGT not found; cannot compute AGL heights.')
+                
+                hgt_var = nc.variables['HGT']
+                h_dims = tuple(getattr(hgt_var, 'dimensions', ()))
+                if 'Time' in h_dims:
+                    hgt = np.array(hgt_var[frame.time_index, :, :], dtype=float32)
+                else:
+                    hgt = np.array(hgt_var[:, :], dtype=float32)
+                
+                z_agl = height - hgt[None, :, :]
+                ny = min(z_agl.shape[1], u_wind.shape[1], v_wind.shape[1])
+                nx = min(z_agl.shape[2], u_wind.shape[2], v_wind.shape[2])
+                z_agl = z_agl[:, :ny, :nx]
+                u_wind = u_wind[:, :ny, :nx]
+                v_wind = v_wind[:, :ny, :nx]
+                
+                if v in ('BSH01', 'SRH01'):
+                    top_m = 1000.0
+                elif v in ('BSH03', 'SRH03'):
+                    top_m = 3000.0
+                else:
+                    top_m = 6000.0
+                if v in ('BSH01', 'BSH03', 'BSH06'):
+                    shear_u, shear_v = bulk_shear_vector(z_agl, u_wind, v_wind, bottom_m=0.0, top_m=top_m)
+                    shear_mag = np.hypot(shear_u, shear_v)
+                    data2d = SurfaceWindData(
+                        scalar=(shear_mag * MPS_TO_KT).astype(float32),
+                        u=(shear_u * MPS_TO_KT).astype(float32),
+                        v=(shear_v * MPS_TO_KT).astype(float32),
+                    )
+                else:
+                    data2d = storm_relative_helicity(z_agl, u_wind, v_wind, bottom_m=0.0, top_m=top_m)
             else:
                 if v not in nc.variables:
                     raise RuntimeError(f'Variable "{var}" not found')
@@ -1328,17 +1755,39 @@ class WRFViewer(QMainWindow):
             'REFL1KM': 'Reflectivity',
             'GUST': 'Wind_Gust',
             'WSPD10': 'Wind_Gust',
+            'HGT200': 'Wind_Gust',
+            'HGT300': 'Wind_Gust',
             'HGT500': 'Wind_Gust',
+            'HGT700': 'Wind_Gust',
+            'HGT850': 'Wind_Gust',
+            'HGT925': 'Wind_Gust',
             'RH2WIND10KT': 'Relative-humidity',
+            'RH200': 'Relative-humidity',
+            'RH300': 'Relative-humidity',
+            'RH500': 'Relative-humidity',
             'RH700': 'Relative-humidity',
+            'RH850': 'Relative-humidity',
+            'RH925': 'Relative-humidity',
             'T2F': 'Temperature',
+            'TEMP500': 'Temperature',
+            'TEMP700': 'Temperature',
             'TEMP850': 'Temperature',
+            'TEMP925': 'Temperature',
             'TD2F': 'Dewpoint',
             'SNOW10': 'Snowfall',
             'SBCAPE': 'Cape',
             'MUCAPE': 'Cape',
             'MLCAPE': 'Cape',
             '03KMCAPE': 'Cape',
+            'UHMAX': 'Cape',
+            'UHMAX251HR': 'Cape',
+            'UHMAX253HR': 'Cape',
+            'UHMAX25': 'Cape',
+            'SRH01': 'Cape',
+            'SRH03': 'Cape',
+            'BSH01': 'Wind_Gust',
+            'BSH03': 'Wind_Gust',
+            'BSH06': 'Wind_Gust',
             'SIRS': 'Simulated_IR_Satellite',
             'OLR': 'OLR',
         }
@@ -1377,20 +1826,43 @@ class WRFViewer(QMainWindow):
                 {'label': 'Surface-Based CAPE', 'canonical': 'SBCAPE'},
                 {'label': 'Most Unstable CAPE', 'canonical': 'MUCAPE'},
                 {'label': 'Mixed-Layer CAPE', 'canonical': 'MLCAPE'},
+                {'label': 'Wind Shear', 'canonical': None, 'is_divider': True},
+                {'label': 'Bulk Shear: 0-1 km AGL', 'canonical': 'BSH01'},
+                {'label': 'Bulk Shear: 0-3 km AGL', 'canonical': 'BSH03'},
+                {'label': 'Bulk Shear: 0-6 km AGL', 'canonical': 'BSH06'},
+                {'label': 'Storm Relative Helicity: 0-1 km AGL', 'canonical': 'SRH01'},
+                {'label': 'Storm Relative Helicity: 0-3 km AGL', 'canonical': 'SRH03'},
                 {'label': 'Excplicit Convective Products', 'canonical': None, 'is_divider': True},
                 {'label': 'Reflectivity, UH', 'canonical': 'MDBZ_1HRUH'},
                 {'label': 'Composite Reflectivity', 'canonical': 'MDBZ'},
                 {'label': 'Reflectivity 1km', 'canonical': 'REFL1KM'},
+                {'label': 'Updraft Helicity: 0-3 km AGL (Run Max)', 'canonical': 'UHMAX'},
+                {'label': 'Updraft Helicity: 2-5 km AGL (1 h Max)', 'canonical': 'UHMAX251HR'},
+                {'label': 'Updraft Helicity: 2-5 km AGL (3 h Max)', 'canonical': 'UHMAX253HR'},
+                {'label': 'Updraft Helicity: 2-5 km AGL (Run Max)', 'canonical': 'UHMAX25'},
             ],
             'Upper Air: Height, Wind, Temperature': [
                 {'label': 'Height and Wind', 'canonical': None, 'is_divider': True},
+                {'label': UPPER_AIR_SPECS['HGT200'].display_name, 'canonical': 'HGT200'},
+                {'label': UPPER_AIR_SPECS['HGT300'].display_name, 'canonical': 'HGT300'},
                 {'label': UPPER_AIR_SPECS['HGT500'].display_name, 'canonical': 'HGT500'},
+                {'label': UPPER_AIR_SPECS['HGT700'].display_name, 'canonical': 'HGT700'},
+                {'label': UPPER_AIR_SPECS['HGT850'].display_name, 'canonical': 'HGT850'},
+                {'label': UPPER_AIR_SPECS['HGT925'].display_name, 'canonical': 'HGT925'},
                 {'label': 'Temperature and Wind', 'canonical': None, 'is_divider': True},
+                {'label': UPPER_AIR_SPECS['TEMP500'].display_name, 'canonical': 'TEMP500'},
+                {'label': UPPER_AIR_SPECS['TEMP700'].display_name, 'canonical': 'TEMP700'},
                 {'label': UPPER_AIR_SPECS['TEMP850'].display_name, 'canonical': 'TEMP850'},
+                {'label': UPPER_AIR_SPECS['TEMP925'].display_name, 'canonical': 'TEMP925'},
             ],
             'Upper Air: Moisture': [
                 {'label': 'Relative Humidity and Wind', 'canonical': None, 'is_divider': True},
+                {'label': UPPER_AIR_SPECS['RH200'].display_name, 'canonical': 'RH200'},
+                {'label': UPPER_AIR_SPECS['RH300'].display_name, 'canonical': 'RH300'},
+                {'label': UPPER_AIR_SPECS['RH500'].display_name, 'canonical': 'RH500'},
                 {'label': UPPER_AIR_SPECS['RH700'].display_name, 'canonical': 'RH700'},
+                {'label': UPPER_AIR_SPECS['RH850'].display_name, 'canonical': 'RH850'},
+                {'label': UPPER_AIR_SPECS['RH925'].display_name, 'canonical': 'RH925'},
             ],
         }
         self._var_aliases: dict[str, str] = {
@@ -2173,6 +2645,15 @@ class WRFViewer(QMainWindow):
             'MUCAPE': 'J kg$^{-1}$',
             'MLCAPE': 'J kg$^{-1}$',
             '03KMCAPE': 'J kg$^{-1}$',
+            'UHMAX': 'm$^2$ s$^{-2}$',
+            'UHMAX251HR': 'm$^2$ s$^{-2}$',
+            'UHMAX253HR': 'm$^2$ s$^{-2}$',
+            'UHMAX25': 'm$^2$ s$^{-2}$',
+            'SRH01': 'm$^2$ s$^2{-2}$',
+            'SRH03': 'm$^2$ s$^2{-2}$',
+            'BSH01': 'kt',
+            'BSH03': 'kt',
+            'BSH06': 'kt',
             'SIRS': '°C',
             'OLR': '°C',
         }
@@ -2646,6 +3127,10 @@ class WRFViewer(QMainWindow):
             label = spec.colorbar_label
         else:
             vmin, vmax, label = self._default_range(var)
+            if var.upper() in ('UHMAX', 'UHMAX251HR', 'UHMAX253HR', 'UHMAX25'):
+                base_max = 200.0 if var.upper() == 'UHMAX' else 400.0
+                vmax = self.loader._uh_range_max(frame.path, base_max)
+                vmin = 0.0
         
         cmap_to_use = self.current_cmap
         norm = None
@@ -2802,6 +3287,18 @@ class WRFViewer(QMainWindow):
             return 0.0, 10000.0, 'Mixed-Layer CAPE (J kg$^{-1}$)'
         if v == '03KMCAPE':
             return 0.0, 500.0, '0-3 km AGL CAPE (J kg$^{-1}$)'
+        if v in ('UHMAX', 'UHMAX251HR', 'UHMAX253HR', 'UHMAX25'):
+            return 0.0, None, 'Updraft Helicity (m$^2$ s$^{-2}$)'
+        if v == 'SRH01':
+            return 0.0, 1000.0, 'Storm Relative Helicity: 0-1 km AGL (m$^2$ s$^2{-2}$)'
+        if v == 'SRH03':
+            return 0.0, 1000.0, 'Storm Relative Helicity: 0-3 km AGL (m$^2$ s$^2{-2}$)'
+        if v == 'BSH01':
+            return 10.0, 70.0, 'Bulk Shear: 0-1 km AGL (kt)'
+        if v == 'BSH03':
+            return 15.0, 100.0, 'Bulk Shear: 0-3 km AGL (kt)'
+        if v == 'BSH06':
+            return 20.0, 140.0, 'Bulk Shear: 0-6 km AGL (kt)'
         if v == 'SIRS':
             return -90.0, 30.0, 'Simulated IR Satellite (°C)'
         if v == 'OLR':
@@ -2839,6 +3336,24 @@ class WRFViewer(QMainWindow):
             return 'Mixed-Layer CAPE (J kg$^{-1}$)'
         if v == '03KMCAPE':
             return '0-3 km AGL CAPE (J kg$^{-1}$)'
+        if v == 'UHMAX':
+            return 'Updraft Helicity: 0-3 km AGL (Run Max) (m$^2$ s$^{-2}$)'
+        if v == 'UHMAX251HR':
+            return 'Updraft Helicity: 2-5 km AGL (1 h Max) (m$^2$ s$^{-2}$)'
+        if v == 'UHMAX253HR':
+            return 'Updraft Helicity: 2-5 km AGL (3 h Max) (m$^2$ s$^{-2}$)'
+        if v == 'UHMAX25':
+            return 'Updraft Helicity: 2-5 km AGL (Run Max) (m$^2$ s$^{-2}$)'
+        if v == 'SRH01':
+            return 'Storm Relative Helicity: 0-1 km AGL (m$^2$ s$^2{-2}$)'
+        if v == 'SRH03':
+            return 'Storm Relative Helicity: 0-3 km AGL (m$^2$ s$^2{-2}$)'
+        if v == 'BSH01':
+            return 'Bulk Shear: 0-1 km AGL (kt)'
+        if v == 'BSH03':
+            return 'Bulk Shear: 0-3 km AGL (kt)'
+        if v == 'BSH06':
+            return 'Bulk Shear: 0-6 km AGL (kt)'
         return display_var
     
     def _precip_type_style(self) -> tuple[ListedColormap, BoundaryNorm, list[int], list[str]]:
